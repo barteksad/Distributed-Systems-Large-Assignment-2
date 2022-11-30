@@ -12,8 +12,6 @@ use crate::register_client_public::RegisterClient;
 use crate::sectors_manager_public::*;
 use crate::stable_storage_public::*;
 
-struct AtomicRegisterInstance;
-
 struct ARWorker {
     self_ident: u8,
     self_id: Uuid,
@@ -63,51 +61,43 @@ impl ARWorker {
     ) -> Self {
         unimplemented!();
     }
-    pub async fn run() {
-        unimplemented!();
-    }
 
-    async fn run_client_handle(
-        &mut self,
-        success_callback: Box<
-            dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
-        >,
-    ) {
+    pub async fn run(&mut self) {
         loop {
-            loop {
-                match self.client_cmd_finished.send(()).await {
-                    Ok(_) => break,
-                    Err(e) => {
-                        debug!("Error in ARWorker request_client_msg.send: {:?}", e);
-                        continue;
-                    }
+            tokio::select! {
+                Ok((client_msg, result_tx)) = self.client_rx.recv() => {
+                    self.handle_client_command(client_msg, result_tx).await;
+                    self.client_cmd_finished.send(()).await.unwrap();
                 }
-            }
-
-            loop {
-                match self.client_rx.recv().await {
-                    Ok((client_msg, result_tx)) => {
-                        let success_callback: Box<
-                            dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>>
-                                + Send
-                                + Sync,
-                        > = Box::new(move |operation_success: OperationSuccess| {
-                            Box::pin(async move { 
-                                if let Err(e) = result_tx.send(operation_success.op_return).await {
-                                    
-                                }
-                                () 
-                            })
-                        });
-
-                        self.client_command(client_msg, success_callback).await
-                    }
-                    Err(e) => {
-                        debug!("Error in ARWorker client_rx.recv: {:?}", e);
-                        continue;
-                    }
+                Err(e) = self.client_rx.recv() => {
+                    debug!("Error in ARWorker client_rx.recv: {:?}", e);
+                }
+                Ok(system_msg) = self.system_rx.recv() => {
+                    self.system_command(system_msg).await;
+                    self.system_cmd_finished.send(()).await.unwrap();
+                }
+                Err(e) = self.system_rx.recv() => {
+                    debug!("Error in ARWorker system_rx.recv: {:?}", e);
                 }
             }
         }
+    }
+
+    async fn handle_client_command(
+        &mut self,
+        client_msg: ClientRegisterCommand,
+        result_tx: Sender<OperationReturn>,
+    ) {
+        let success_callback: Box<
+            dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
+        > = Box::new(move |operation_success: OperationSuccess| {
+            Box::pin(async move {
+                if let Err(e) = result_tx.send(operation_success.op_return).await {
+                    debug!("Error in ARWorker result_tx.send: {:?}", e);
+                }
+            })
+        });
+
+        self.client_command(client_msg, success_callback).await
     }
 }
