@@ -1,4 +1,5 @@
 mod domain;
+mod implementation;
 
 pub use crate::domain::*;
 pub use atomic_register_public::*;
