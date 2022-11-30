@@ -5,20 +5,23 @@ use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
-// use crate::{StableStorage, RegisterClient, SectorsManager, AtomicRegister, ClientRegisterCommand, OperationSuccess, SystemRegisterCommand};
 use crate::atomic_register_public::*;
 use crate::domain::*;
 use crate::register_client_public::RegisterClient;
 use crate::sectors_manager_public::*;
 use crate::stable_storage_public::*;
 
-struct ARWorker {
+struct AtomicRegisterInstance {
     self_ident: u8,
     self_id: Uuid,
     metadata: Box<dyn StableStorage>,
     register_client: Arc<dyn RegisterClient>,
     sectors_manager: Arc<dyn SectorsManager>,
     processes_count: u8,
+}
+
+struct ARWorker {
+    ar_instance: AtomicRegisterInstance,
     client_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
     system_rx: Receiver<SystemRegisterCommand>,
     client_cmd_finished: Sender<()>,
@@ -26,7 +29,7 @@ struct ARWorker {
 }
 
 #[async_trait::async_trait]
-impl AtomicRegister for ARWorker {
+impl AtomicRegister for AtomicRegisterInstance {
     async fn client_command(
         &mut self,
         cmd: ClientRegisterCommand,
@@ -73,7 +76,7 @@ impl ARWorker {
                     debug!("Error in ARWorker client_rx.recv: {:?}", e);
                 }
                 Ok(system_msg) = self.system_rx.recv() => {
-                    self.system_command(system_msg).await;
+                    self.ar_instance.system_command(system_msg).await;
                     self.system_cmd_finished.send(()).await.unwrap();
                 }
                 Err(e) = self.system_rx.recv() => {
@@ -98,6 +101,6 @@ impl ARWorker {
             })
         });
 
-        self.client_command(client_msg, success_callback).await
+        self.ar_instance.client_command(client_msg, success_callback).await
     }
 }
