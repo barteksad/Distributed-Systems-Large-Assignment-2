@@ -1,16 +1,18 @@
-use std::sync::Arc;
-use async_channel::{Sender, Receiver};
+use async_channel::{Receiver, Sender};
 use log::debug;
-use uuid::Uuid;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use uuid::Uuid;
 
 // use crate::{StableStorage, RegisterClient, SectorsManager, AtomicRegister, ClientRegisterCommand, OperationSuccess, SystemRegisterCommand};
 use crate::atomic_register_public::*;
-use crate::sectors_manager_public::*;
-use crate::register_client_public::RegisterClient;
-use crate::stable_storage_public::*;
 use crate::domain::*;
+use crate::register_client_public::RegisterClient;
+use crate::sectors_manager_public::*;
+use crate::stable_storage_public::*;
+
+struct AtomicRegisterInstance;
 
 struct ARWorker {
     self_ident: u8,
@@ -31,9 +33,7 @@ impl AtomicRegister for ARWorker {
         &mut self,
         cmd: ClientRegisterCommand,
         success_callback: Box<
-            dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>>
-                + Send
-                + Sync,
+            dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         >,
     ) {
         unimplemented!();
@@ -67,36 +67,47 @@ impl ARWorker {
         unimplemented!();
     }
 
-    async fn run_client_handle(self: &Arc<Self>) {
-        let me = self.clone();
-
-        let client_handle = tokio::spawn(async move {
+    async fn run_client_handle(
+        &mut self,
+        success_callback: Box<
+            dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
+        >,
+    ) {
+        loop {
             loop {
-                match me.client_cmd_finished.send(()).await {
+                match self.client_cmd_finished.send(()).await {
                     Ok(_) => break,
                     Err(e) => {
                         debug!("Error in ARWorker request_client_msg.send: {:?}", e);
                         continue;
-                    },
+                    }
                 }
             }
 
             loop {
-                match me.client_rx.recv().await {
+                match self.client_rx.recv().await {
                     Ok((client_msg, result_tx)) => {
-                        let success_callback = |operation_success: OperationSuccess| {
-                            result_tx.send(operation_success.op_return)
-                        };
+                        let success_callback: Box<
+                            dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>>
+                                + Send
+                                + Sync,
+                        > = Box::new(move |operation_success: OperationSuccess| {
+                            Box::pin(async move { 
+                                if let Err(e) = result_tx.send(operation_success.op_return).await {
+                                    
+                                }
+                                () 
+                            })
+                        });
 
-                        me.client_command(client_msg, success_callback).await
-                    },
+                        self.client_command(client_msg, success_callback).await
+                    }
                     Err(e) => {
                         debug!("Error in ARWorker client_rx.recv: {:?}", e);
                         continue;
-                    },
+                    }
                 }
             }
-
-        });
+        }
     }
 }
