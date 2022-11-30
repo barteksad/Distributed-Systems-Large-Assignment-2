@@ -20,7 +20,7 @@ struct AtomicRegisterInstance {
     processes_count: u8,
 }
 
-struct ARWorker {
+pub struct ARWorker {
     ar_instance: AtomicRegisterInstance,
     client_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
     system_rx: Receiver<SystemRegisterCommand>,
@@ -32,7 +32,7 @@ struct ARWorker {
 impl AtomicRegister for AtomicRegisterInstance {
     async fn client_command(
         &mut self,
-        cmd: ClientRegisterCommand,
+        cmd: ClientRegisterCommand, 
         success_callback: Box<
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         >,
@@ -57,10 +57,10 @@ impl ARWorker {
         register_client: Arc<dyn RegisterClient>,
         sectors_manager: Arc<dyn SectorsManager>,
         processes_count: u8,
-        client_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
-        system_rx: Receiver<SystemRegisterCommand>,
-        client_cmd_finished: Sender<()>,
-        system_cmd_finished: Sender<()>,
+        client_msg_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
+        system_msg_rx: Receiver<SystemRegisterCommand>,
+        client_msg_finished_tx: Sender<Uuid>,
+        system_msg_finished_tx: Sender<Uuid>,
     ) -> Self {
         unimplemented!();
     }
