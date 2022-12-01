@@ -21,11 +21,14 @@ struct AtomicRegisterInstance {
 }
 
 pub struct ARWorker {
+    self_id: Uuid,
     ar_instance: AtomicRegisterInstance,
     client_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
     system_rx: Receiver<SystemRegisterCommand>,
-    client_cmd_finished: Sender<()>,
-    system_cmd_finished: Sender<()>,
+    client_msg_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
+    system_msg_rx: Receiver<SystemRegisterCommand>,
+    client_msg_finished_tx: Sender<Uuid>,
+    system_msg_finished_tx: Sender<SectorIdx>,
 }
 
 #[async_trait::async_trait]
@@ -60,7 +63,7 @@ impl ARWorker {
         client_msg_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
         system_msg_rx: Receiver<SystemRegisterCommand>,
         client_msg_finished_tx: Sender<Uuid>,
-        system_msg_finished_tx: Sender<Uuid>,
+        system_msg_finished_tx: Sender<SectorIdx>,
     ) -> Self {
         unimplemented!();
     }
@@ -70,14 +73,15 @@ impl ARWorker {
             tokio::select! {
                 Ok((client_msg, result_tx)) = self.client_rx.recv() => {
                     self.handle_client_command(client_msg, result_tx).await;
-                    self.client_cmd_finished.send(()).await.unwrap();
+                    self.client_msg_finished_tx.send(self.self_id).await.unwrap();
                 }
                 Err(e) = self.client_rx.recv() => {
                     debug!("Error in ARWorker client_rx.recv: {:?}", e);
                 }
                 Ok(system_msg) = self.system_rx.recv() => {
+                    let sector_idx = system_msg.header.sector_idx;
                     self.ar_instance.system_command(system_msg).await;
-                    self.system_cmd_finished.send(()).await.unwrap();
+                    self.system_msg_finished_tx.send(sector_idx).await.unwrap();
                 }
                 Err(e) = self.system_rx.recv() => {
                     debug!("Error in ARWorker system_rx.recv: {:?}", e);
