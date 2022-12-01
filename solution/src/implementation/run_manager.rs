@@ -19,7 +19,7 @@ use super::{
 
 static ARWORKER_COUNT: usize = 16;
 
-struct RunManager {
+pub struct RunManager {
     ready_for_client: Vec<Uuid>,
     ready_for_system: Vec<Uuid>,
     sector2rw: HashMap<SectorIdx, (usize, Uuid)>,

@@ -1,6 +1,6 @@
 use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
-use async_channel::Sender;
+use async_channel::{Sender, bounded};
 use log::debug;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -75,8 +75,8 @@ impl TCPConnector {
 
     pub async fn client_message_handle(&self, socket: TcpStream) {
         unimplemented!();
-        // let client_msg : ClientRegisterCommand;
-        // let (result_tx, result_rx) = bounded(1);
-        // self.request_client_msg_handle_tx.send((client_msg, result_tx)).await.unwrap();
+        let client_msg : ClientRegisterCommand;
+        let (result_tx, result_rx) = bounded(2);
+        self.request_client_msg_handle_tx.send((client_msg, result_tx)).await.unwrap();
     }
 }
