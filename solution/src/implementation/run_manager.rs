@@ -17,7 +17,7 @@ use super::{
     client_connector::ClientConnector, sector_storage::SectorStorage, tcp_connector::TCPConnector,
 };
 
-static ARWORKER_COUNT: usize = 16;
+static ARWORKER_COUNT: u8 = 16;
 
 pub struct RunManager {
     ready_for_client: Vec<Uuid>,
@@ -58,7 +58,7 @@ impl RunManager {
         let mut uuid2system_msg_tx = HashMap::new();
 
         for i in 0..ARWORKER_COUNT {
-            let uuid = Uuid::new_v4();
+            let uuid = Uuid::from_u128((config.public.self_rank * ARWORKER_COUNT + i) as u128);
 
             let mut worker_path = config.public.storage_dir.clone();
             worker_path.push(format!("stable-storage-{}", i));
@@ -71,6 +71,7 @@ impl RunManager {
             let (client_msg_tx, client_msg_rx) =
                 bounded::<(ClientRegisterCommand, Sender<OperationReturn>)>(1);
             let (system_msg_tx, system_msg_rx) = unbounded::<SystemRegisterCommand>();
+            
             uuid2client_msg_tx.insert(uuid, client_msg_tx);
             uuid2system_msg_tx.insert(uuid, system_msg_tx);
 
@@ -78,7 +79,7 @@ impl RunManager {
                 config.public.self_rank,
                 uuid,
                 stable_storage,
-                register_client.clone(),
+                register_client.clone() as Arc<dyn RegisterClient>,
                 sectors_manager.clone(),
                 config.public.tcp_locations.len() as u8,
                 client_msg_rx.clone(),
@@ -86,7 +87,6 @@ impl RunManager {
                 client_msg_finished_tx.clone(),
                 system_msg_finished_tx.clone(),
             );
-
             tokio::spawn(async move { arworker.run().await });
         }
 

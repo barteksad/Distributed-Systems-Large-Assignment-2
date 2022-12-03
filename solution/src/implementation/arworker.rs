@@ -1,5 +1,7 @@
 use async_channel::{Receiver, Sender};
 use log::debug;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,24 +20,36 @@ struct AtomicRegisterInstance {
     register_client: Arc<dyn RegisterClient>,
     sectors_manager: Arc<dyn SectorsManager>,
     processes_count: u8,
+
+    readlist: HashMap<u8, (u64, u8, SectorVec)>,
+    acklist: HashSet<u8>,
 }
 
-pub struct ARWorker {
-    self_id: Uuid,
-    ar_instance: AtomicRegisterInstance,
-    client_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
-    system_rx: Receiver<SystemRegisterCommand>,
-    client_msg_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
-    system_msg_rx: Receiver<SystemRegisterCommand>,
-    client_msg_finished_tx: Sender<Uuid>,
-    system_msg_finished_tx: Sender<SectorIdx>,
+impl AtomicRegisterInstance {
+    fn new(
+        self_ident: u8,
+        self_id: Uuid,
+        metadata: Box<dyn StableStorage>,
+        register_client: Arc<dyn RegisterClient>,
+        sectors_manager: Arc<dyn SectorsManager>,
+        processes_count: u8,
+    ) -> Self {
+        AtomicRegisterInstance {
+            self_ident,
+            self_id,
+            metadata,
+            register_client,
+            sectors_manager,
+            processes_count,
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl AtomicRegister for AtomicRegisterInstance {
     async fn client_command(
         &mut self,
-        cmd: ClientRegisterCommand, 
+        cmd: ClientRegisterCommand,
         success_callback: Box<
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         >,
@@ -43,13 +57,25 @@ impl AtomicRegister for AtomicRegisterInstance {
         unimplemented!();
     }
 
-    /// Handle a system command.
-    ///
-    /// This function corresponds to the handlers of READ_PROC, VALUE, WRITE_PROC
-    /// and ACK messages in the (N,N)-AtomicRegister algorithm.
     async fn system_command(&mut self, cmd: SystemRegisterCommand) {
-        unimplemented!();
+        let rid_maybe: Vec<u8> = self
+            .metadata
+            .get(&"rid".to_string())
+            .await
+            .unwrap_or(bincode::serialize(&(0 as usize)).unwrap());
+        let rid: usize = bincode::deserialize::<usize>(&rid_maybe)
+            .expect("Error reading rid from StableStorage")
+            + 1;
     }
+}
+
+pub struct ARWorker {
+    self_id: Uuid,
+    ar: Box<dyn AtomicRegister>,
+    client_msg_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
+    system_msg_rx: Receiver<SystemRegisterCommand>,
+    client_msg_finished_tx: Sender<Uuid>,
+    system_msg_finished_tx: Sender<SectorIdx>,
 }
 
 impl ARWorker {
@@ -65,25 +91,41 @@ impl ARWorker {
         client_msg_finished_tx: Sender<Uuid>,
         system_msg_finished_tx: Sender<SectorIdx>,
     ) -> Self {
-        unimplemented!();
+        let ar = AtomicRegisterInstance::new(
+            self_ident,
+            self_id,
+            metadata,
+            register_client,
+            sectors_manager,
+            processes_count,
+        );
+
+        ARWorker {
+            self_id,
+            ar,
+            client_msg_rx,
+            system_msg_rx,
+            client_msg_finished_tx,
+            system_msg_finished_tx,
+        }
     }
 
     pub async fn run(&mut self) {
         loop {
             tokio::select! {
-                Ok((client_msg, result_tx)) = self.client_rx.recv() => {
+                Ok((client_msg, result_tx)) = self.client_msg_rx.recv() => {
                     self.handle_client_command(client_msg, result_tx).await;
                     self.client_msg_finished_tx.send(self.self_id).await.unwrap();
                 }
-                Err(e) = self.client_rx.recv() => {
+                Err(e) = self.client_msg_rx.recv() => {
                     debug!("Error in ARWorker client_rx.recv: {:?}", e);
                 }
-                Ok(system_msg) = self.system_rx.recv() => {
+                Ok(system_msg) = self.system_msg_rx.recv() => {
                     let sector_idx = system_msg.header.sector_idx;
-                    self.ar_instance.system_command(system_msg).await;
+                    self.ar.system_command(system_msg).await;
                     self.system_msg_finished_tx.send(sector_idx).await.unwrap();
                 }
-                Err(e) = self.system_rx.recv() => {
+                Err(e) = self.system_msg_rx.recv() => {
                     debug!("Error in ARWorker system_rx.recv: {:?}", e);
                 }
             }
@@ -105,6 +147,6 @@ impl ARWorker {
             })
         });
 
-        self.ar_instance.client_command(client_msg, success_callback).await
+        self.ar.client_command(client_msg, success_callback).await
     }
 }
