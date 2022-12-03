@@ -1,6 +1,8 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_channel::{bounded, unbounded, Receiver, Sender};
+use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
 use crate::{
@@ -10,6 +12,10 @@ use crate::{
 
 use crate::register_client_public::{Broadcast, Send};
 
+use super::utils::stubborn_send;
+
+static MAX_NOT_SEND_MSG_COUNT: usize = 256; 
+
 struct Connection {
     host: String,
     port: u16,
@@ -18,7 +24,57 @@ struct Connection {
 }
 
 impl Connection {
-    async fn run(&mut self) {}
+    fn new(
+        host: String,
+        port: u16,
+        msg_queue: Receiver<Vec<u8>>,
+        recover_rx: Receiver<()>,
+    ) -> Self {
+        Connection {
+            host,
+            port,
+            msg_queue,
+            recover_rx,
+        }
+    }
+    async fn run(&mut self) {
+        let peer_address = format!("{}:{}", self.host, self.port);
+        let mut not_send : VecDeque<Vec<u8>> = VecDeque::with_capacity(256);
+        loop {
+            if let Ok(stream) = TcpStream::connect(&peer_address).await {
+                'send_loop: loop {
+                    while !not_send.is_empty() {
+                        if stubborn_send(&stream, not_send.front().unwrap()).await {
+                            not_send.pop_front();
+                        } else {
+                            break 'send_loop;
+                        }
+                    }
+
+                    if let Ok(msg) = self.msg_queue.recv().await {
+                        if !stubborn_send(&stream, &msg).await {
+                            not_send.push_back(msg);
+                            break 'send_loop;
+                        }
+                    }
+                }
+            }
+
+            'recover_wait_loop: loop {
+                tokio::select! {
+                    _ = self.recover_rx.recv() => {
+                        break 'recover_wait_loop;
+                    },
+                    Ok(msg) = self.msg_queue.recv() => {
+                        not_send.push_back(msg);
+                        if not_send.len() > MAX_NOT_SEND_MSG_COUNT {
+                            not_send.pop_front();
+                        }
+                    }
+                };
+            }
+        }
+    }
 }
 
 pub struct ClientConnector {
@@ -88,7 +144,9 @@ impl ClientConnector {
             self.recover_txs
                 .get(self.process2index(process))
                 .unwrap()
-                .send(()).await.unwrap();
+                .send(())
+                .await
+                .unwrap();
         }
     }
 }

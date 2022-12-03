@@ -8,7 +8,7 @@ use tokio::{net::TcpStream, time::{Instant, sleep}};
 type HmacSha256 = Hmac<Sha256>;
 
 static N_SEND_TRIES: usize = 5;
-static NEXT_SEND_DELAY: Duration = Duration::from_millis(1000); 
+static NEXT_SEND_DELAY: Duration = Duration::from_millis(5000); 
 
 pub fn add_hmac_tag(header_buff: &Vec<u8>, content_buff: &Vec<u8>, hmac_key: &[u8; 32]) -> Vec<u8> {
     let mut mac = HmacSha256::new_from_slice(hmac_key).unwrap();
