@@ -12,8 +12,9 @@ use crate::domain::*;
 use crate::register_client_public::RegisterClient;
 use crate::sectors_manager_public::*;
 use crate::stable_storage_public::*;
+use crate::Broadcast;
 
-struct AtomicRegisterInstance {
+pub struct AtomicRegisterInstance {
     self_ident: u8,
     self_id: Uuid,
     metadata: Box<dyn StableStorage>,
@@ -22,11 +23,19 @@ struct AtomicRegisterInstance {
     processes_count: u8,
 
     readlist: HashMap<u8, (u64, u8, SectorVec)>,
+    reading: bool,
+    writing: bool,
     acklist: HashSet<u8>,
+    writeval: Option<SectorVec>,
+    readval: Option<SectorVec>,
+    write_phase: bool,
+    success_callback: Option<
+        Box<dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+    >,
 }
 
 impl AtomicRegisterInstance {
-    fn new(
+    pub async fn new(
         self_ident: u8,
         self_id: Uuid,
         metadata: Box<dyn StableStorage>,
@@ -41,7 +50,83 @@ impl AtomicRegisterInstance {
             register_client,
             sectors_manager,
             processes_count,
+            readlist: HashMap::new(),
+            acklist: HashSet::new(),
+            reading: false,
+            writing: false,
+            writeval: None,
+            readval: None,
+            write_phase: false,
+            success_callback: None,
         }
+    }
+
+    async fn get_rid(&mut self) -> u64 {
+        let rid_maybe: Vec<u8> = self
+            .metadata
+            .get(&"rid".to_string())
+            .await
+            .unwrap_or(bincode::serialize(&(0 as u64)).unwrap());
+        bincode::deserialize::<u64>(&rid_maybe).expect("Error reading rid from StableStorage")
+    }
+
+    async fn store_rid(&mut self, rid: u64) {
+        let data = bincode::serialize(&rid).unwrap();
+        self.metadata
+            .put(&"rid".to_string(), &data)
+            .await
+            .expect("Error storing rid in StableStorage");
+    }
+
+    async fn client_read(&mut self, header: ClientCommandHeader) {
+        let rid = self.get_rid().await + 1;
+        self.store_rid(rid).await;
+        self.readlist.clear();
+        self.acklist.clear();
+        self.reading = true;
+
+        let sector_idx = header.sector_idx;
+        let system_msg = SystemRegisterCommand {
+            header: SystemCommandHeader {
+                process_identifier: self.self_ident,
+                msg_ident: self.self_id,
+                read_ident: rid,
+                sector_idx: sector_idx,
+            },
+            content: SystemRegisterCommandContent::ReadProc,
+        };
+
+        self.register_client
+            .broadcast(Broadcast {
+                cmd: Arc::new(system_msg),
+            })
+            .await;
+    }
+
+    async fn client_write(&mut self, header: ClientCommandHeader, data: SectorVec) {
+        let rid = self.get_rid().await + 1;
+        self.writeval = Some(data);
+        self.readlist.clear();
+        self.acklist.clear();
+        self.writing = true;
+        self.store_rid(rid).await;
+
+        let sector_idx = header.sector_idx;
+        let system_msg = SystemRegisterCommand {
+            header: SystemCommandHeader {
+                process_identifier: self.self_ident,
+                msg_ident: self.self_id,
+                read_ident: rid,
+                sector_idx: sector_idx,
+            },
+            content: SystemRegisterCommandContent::ReadProc,
+        };
+
+        self.register_client
+            .broadcast(Broadcast {
+                cmd: Arc::new(system_msg),
+            })
+            .await;
     }
 }
 
@@ -54,18 +139,20 @@ impl AtomicRegister for AtomicRegisterInstance {
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         >,
     ) {
-        unimplemented!();
+        self.success_callback = Some(success_callback);
+
+        match cmd.content {
+            ClientRegisterCommandContent::Read => {
+                self.client_read(cmd.header).await;
+            }
+            ClientRegisterCommandContent::Write { data } => {
+                self.client_write(cmd.header, data).await;
+            }
+        };
     }
 
     async fn system_command(&mut self, cmd: SystemRegisterCommand) {
-        let rid_maybe: Vec<u8> = self
-            .metadata
-            .get(&"rid".to_string())
-            .await
-            .unwrap_or(bincode::serialize(&(0 as usize)).unwrap());
-        let rid: usize = bincode::deserialize::<usize>(&rid_maybe)
-            .expect("Error reading rid from StableStorage")
-            + 1;
+        unimplemented!();
     }
 }
 
@@ -79,7 +166,7 @@ pub struct ARWorker {
 }
 
 impl ARWorker {
-    pub fn new(
+    pub async fn new(
         self_ident: u8,
         self_id: Uuid,
         metadata: Box<dyn StableStorage>,
@@ -91,14 +178,14 @@ impl ARWorker {
         client_msg_finished_tx: Sender<Uuid>,
         system_msg_finished_tx: Sender<SectorIdx>,
     ) -> Self {
-        let ar = AtomicRegisterInstance::new(
+        let ar = build_atomic_register(
             self_ident,
-            self_id,
             metadata,
             register_client,
             sectors_manager,
             processes_count,
-        );
+        )
+        .await;
 
         ARWorker {
             self_id,

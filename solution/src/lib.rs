@@ -21,6 +21,9 @@ pub async fn run_register_process(config: Configuration) {
 }
 
 pub mod atomic_register_public {
+    use uuid::Uuid;
+
+    use crate::implementation::arworker::AtomicRegisterInstance;
     use crate::{
         ClientRegisterCommand, OperationSuccess, RegisterClient, SectorsManager, StableStorage,
         SystemRegisterCommand,
@@ -68,7 +71,14 @@ pub mod atomic_register_public {
         sectors_manager: Arc<dyn SectorsManager>,
         processes_count: u8,
     ) -> Box<dyn AtomicRegister> {
-        unimplemented!()
+        Box::new(AtomicRegisterInstance::new( 
+            self_ident, 
+            Uuid::new_v4(),
+            metadata, 
+            register_client, 
+            sectors_manager, 
+            processes_count,
+        ).await)
     }
 }
 

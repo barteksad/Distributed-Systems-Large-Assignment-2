@@ -86,7 +86,7 @@ impl RunManager {
                 system_msg_rx.clone(),
                 client_msg_finished_tx.clone(),
                 system_msg_finished_tx.clone(),
-            );
+            ).await;
             tokio::spawn(async move { arworker.run().await });
         }
 
