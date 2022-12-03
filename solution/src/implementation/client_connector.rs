@@ -1,14 +1,17 @@
 use crate::RegisterClient;
 
-
+use crate::register_client_public::{Send, Broadcast};
 pub struct ClientConnector;
 
+#[async_trait::async_trait]
 impl RegisterClient for ClientConnector {
-    fn send<'life0,'async_trait>(&'life0 self,msg:crate::Send) ->  core::pin::Pin<Box<dyn core::future::Future<Output = ()> + core::marker::Send+'async_trait> >where 'life0:'async_trait,Self:'async_trait {
-        unimplemented!();
+    /// Sends a system message to a single process.
+    async fn send(&self, msg: Send) {
+
     }
 
-    fn broadcast<'life0,'async_trait>(&'life0 self,msg:crate::Broadcast) ->  core::pin::Pin<Box<dyn core::future::Future<Output = ()> + core::marker::Send+'async_trait> >where 'life0:'async_trait,Self:'async_trait {
-        unimplemented!();
+    /// Broadcasts a system message to all processes in the system, including self.
+    async fn broadcast(&self, msg: Broadcast) {
+        
     }
 }

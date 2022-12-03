@@ -143,7 +143,7 @@ impl RunManager {
                 Ok(sector_idx) = self.system_msg_finished_rx.recv() => {
                     let (rw_count, uuid) = self.sector2rw.get_mut(&sector_idx).unwrap();
                     *rw_count -= 1;
-                    if(*rw_count == 0) {
+                    if *rw_count == 0 {
                         self.ready_for_system.push(*uuid);
                         self.sector2rw.remove(&sector_idx);
                     }

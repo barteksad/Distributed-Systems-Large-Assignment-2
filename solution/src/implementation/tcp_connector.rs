@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
 use async_channel::{bounded, Sender};
-use bytes::Buf;
-use hmac::digest::typenum::operator_aliases;
 use log::debug;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::{
-    deserialize_register_command, ClientRegisterCommand, Configuration, OperationReturn,
-    RegisterCommand, SectorIdx, StatusCode, SystemRegisterCommand, MAGIC_NUMBER, ClientRegisterCommandContent,
+    deserialize_register_command, ClientRegisterCommand, ClientRegisterCommandContent,
+    Configuration, OperationReturn, RegisterCommand, SectorIdx, StatusCode, SystemRegisterCommand,
+    MAGIC_NUMBER,
 };
 
 use super::utils::{add_hmac_tag, stubborn_send};
@@ -119,7 +118,7 @@ impl TCPConnector {
         loop {
             let mut op_return: Option<OperationReturn> = None;
             let request_identifier = client_msg.header.request_identifier;
-            let msg_type : u8 = match client_msg.content {
+            let msg_type: u8 = match client_msg.content {
                 ClientRegisterCommandContent::Read => 0x41,
                 ClientRegisterCommandContent::Write { .. } => 0x42,
             };
@@ -143,7 +142,13 @@ impl TCPConnector {
                 assert!(op_return.is_some());
             }
 
-            self.send_client_response(socket, status_code, op_return, msg_type, request_identifier);
+            self.send_client_response(
+                &socket,
+                status_code,
+                op_return,
+                msg_type,
+                request_identifier,
+            ).await;
 
             if let Ok((RegisterCommand::Client(new_client_msg), new_hmac_valid)) =
                 deserialize_register_command(
@@ -164,19 +169,21 @@ impl TCPConnector {
 
     async fn send_client_response(
         &self,
-        mut socket: TcpStream,
+        socket: &TcpStream,
         status_code: StatusCode,
         op_return: Option<OperationReturn>,
-        msg_type: u8, 
+        msg_type: u8,
         request_identifier: u64,
     ) {
         let mut header_buff = Vec::<u8>::with_capacity(128);
         let (mut content_buff, content) = match op_return {
             None => (vec![0u8, 0], None),
-            Some(OperationReturn::Read(read_ret)) => (Vec::<u8>::with_capacity(4096), Some(read_ret)),
+            Some(OperationReturn::Read(read_ret)) => {
+                (Vec::<u8>::with_capacity(4096), Some(read_ret))
+            }
             Some(OperationReturn::Write) => (Vec::<u8>::with_capacity(0), None),
         };
-        
+
         header_buff.extend(&MAGIC_NUMBER);
         header_buff.extend([0u8, 0u8]); // Padding
         header_buff.push(status_code as u8);
@@ -188,4 +195,5 @@ impl TCPConnector {
         let hmac_tag = add_hmac_tag(&header_buff, &content_buff, &self.hmac_client_key);
         let data = [header_buff, content_buff, hmac_tag].concat();
         stubborn_send(socket, &data[..]).await;
+    }
 }
