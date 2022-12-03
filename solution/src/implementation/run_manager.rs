@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     implementation::{arworker::ARWorker, storage_data::build_stable_storage},
     ClientRegisterCommand, Configuration, OperationReturn, SectorIdx, SystemRegisterCommand,
-    SystemRegisterCommandContent::{Ack, ReadProc, Value, WriteProc},
+    SystemRegisterCommandContent::{Ack, ReadProc, Value, WriteProc}, RegisterClient,
 };
 
 use super::{
@@ -36,18 +36,18 @@ impl RunManager {
     pub async fn new(config: Configuration, tcp_listener: TcpListener) -> Self {
         let (request_client_msg_handle_tx, request_client_msg_handle_rx) = bounded(1);
         let (request_system_msg_handle_tx, request_system_msg_handle_rx) = unbounded();
+        let (system_recovered_tx, system_recovered_rx) = bounded(1);
         let tcp_connector = Arc::new(TCPConnector::new(
             &config,
             request_client_msg_handle_tx,
-            request_system_msg_handle_tx,
+            request_system_msg_handle_tx.clone(),
+            system_recovered_tx
         ));
         tokio::spawn(async move { tcp_connector.run(tcp_listener).await });
 
         let sectors_manager = Arc::new(SectorStorage {});
-        let register_client = Arc::new(ClientConnector {});
-        // tokio::spawn(async move { sectors_manager.run().await });
-        // tokio::spawn(async move { register_client.run().await });
-
+        let register_client = Arc::new(ClientConnector::new(&config, request_system_msg_handle_tx, system_recovered_rx));
+        
         let (client_msg_finished_tx, client_msg_finished_rx) = unbounded::<Uuid>();
         let (system_msg_finished_tx, system_msg_finished_rx) = unbounded::<SectorIdx>();
 
@@ -89,6 +89,9 @@ impl RunManager {
 
             tokio::spawn(async move { arworker.run().await });
         }
+
+        // tokio::spawn(async move { sectors_manager.run().await });
+        tokio::spawn(async move { register_client.run().await });
 
         RunManager {
             ready_for_client,

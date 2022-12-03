@@ -18,6 +18,7 @@ pub struct TCPConnector {
     n_sectors: SectorIdx,
     request_client_msg_handle_tx: Sender<(ClientRegisterCommand, Sender<OperationReturn>)>,
     request_system_msg_handle_tx: Sender<SystemRegisterCommand>,
+    system_recovered_tx: Sender<u8>,
 }
 
 pub async fn get_listener(config: &Configuration) -> TcpListener {
@@ -33,6 +34,7 @@ impl TCPConnector {
         config: &Configuration,
         request_client_msg_handle_tx: Sender<(ClientRegisterCommand, Sender<OperationReturn>)>,
         request_system_msg_handle_tx: Sender<SystemRegisterCommand>,
+        system_recovered_tx: Sender<u8>,
     ) -> Self {
         TCPConnector {
             hmac_client_key: config.hmac_client_key,
@@ -40,6 +42,7 @@ impl TCPConnector {
             n_sectors: config.public.n_sectors,
             request_client_msg_handle_tx,
             request_system_msg_handle_tx,
+            system_recovered_tx,
         }
     }
 
@@ -79,6 +82,8 @@ impl TCPConnector {
         mut system_msg: SystemRegisterCommand,
         mut hmac_valid: bool,
     ) {
+        self.system_recovered_tx.send(system_msg.header.process_identifier).await.unwrap();
+        
         loop {
             if hmac_valid {
                 self.request_system_msg_handle_tx
