@@ -8,7 +8,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::build_atomic_register;
 use crate::AtomicRegister;
 use crate::Broadcast;
 use crate::ClientCommandHeader;
@@ -335,7 +334,7 @@ impl AtomicRegister for AtomicRegisterInstance {
                     .await;
             }
             SystemRegisterCommandContent::Ack => {
-
+                self.system_ack(cmd.header).await;
             }
         }
     }
@@ -363,14 +362,14 @@ impl ARWorker {
         client_msg_finished_tx: Sender<Uuid>,
         system_msg_finished_tx: Sender<SectorIdx>,
     ) -> Self {
-        let ar = build_atomic_register(
-            self_ident,
-            metadata,
-            register_client,
-            sectors_manager,
+        let ar = Box::new(AtomicRegisterInstance::new( 
+            self_ident, 
+            self_id,
+            metadata, 
+            register_client, 
+            sectors_manager, 
             processes_count,
-        )
-        .await;
+        ).await);
 
         ARWorker {
             self_id,

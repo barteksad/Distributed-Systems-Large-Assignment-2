@@ -1,18 +1,25 @@
-use crate::SectorsManager;
+use crate::{SectorsManager, SectorIdx, SectorVec};
 
 
 pub struct SectorStorage;
 
+#[async_trait::async_trait]
 impl SectorsManager for SectorStorage {
-    fn read_data<'life0,'async_trait>(&'life0 self,idx:crate::SectorIdx) ->  core::pin::Pin<Box<dyn core::future::Future<Output = crate::SectorVec> + core::marker::Send+'async_trait> >where 'life0:'async_trait,Self:'async_trait {
+    /// Returns 4096 bytes of sector data by index.
+    async fn read_data(&self, idx: SectorIdx) -> SectorVec {
         unimplemented!();
     }
 
-    fn read_metadata<'life0,'async_trait>(&'life0 self,idx:crate::SectorIdx) ->  core::pin::Pin<Box<dyn core::future::Future<Output = (u64,u8)> + core::marker::Send+'async_trait> >where 'life0:'async_trait,Self:'async_trait {
+    /// Returns timestamp and write rank of the process which has saved this data.
+    /// Timestamps and ranks are relevant for atomic register algorithm, and are described
+    /// there.
+    async fn read_metadata(&self, idx: SectorIdx) -> (u64, u8){
         unimplemented!();
     }
 
-    fn write<'life0,'life1,'async_trait>(&'life0 self,idx:crate::SectorIdx,sector: &'life1(crate::SectorVec,u64,u8)) ->  core::pin::Pin<Box<dyn core::future::Future<Output = ()> + core::marker::Send+'async_trait> >where 'life0:'async_trait,'life1:'async_trait,Self:'async_trait {
+    /// Writes a new data, along with timestamp and write rank to some sector.
+    async fn write(&self, idx: SectorIdx, sector: &(SectorVec, u64, u8)){
         unimplemented!();
     }
+
 }

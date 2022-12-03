@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use async_channel::{bounded, unbounded, Receiver, Sender};
 use tokio::net::TcpStream;
-use tokio::task::JoinHandle;
 
 use crate::{
     serialize_register_command, Configuration, RegisterClient, RegisterCommand,
@@ -14,7 +13,7 @@ use crate::register_client_public::{Broadcast, Send};
 
 use super::utils::stubborn_send;
 
-static MAX_NOT_SEND_MSG_COUNT: usize = 256; 
+static MAX_NOT_SEND_MSG_COUNT: usize = 256;
 
 struct Connection {
     host: String,
@@ -24,22 +23,9 @@ struct Connection {
 }
 
 impl Connection {
-    fn new(
-        host: String,
-        port: u16,
-        msg_queue: Receiver<Vec<u8>>,
-        recover_rx: Receiver<()>,
-    ) -> Self {
-        Connection {
-            host,
-            port,
-            msg_queue,
-            recover_rx,
-        }
-    }
     async fn run(&mut self) {
         let peer_address = format!("{}:{}", self.host, self.port);
-        let mut not_send : VecDeque<Vec<u8>> = VecDeque::with_capacity(256);
+        let mut not_send: VecDeque<Vec<u8>> = VecDeque::with_capacity(256);
         loop {
             if let Ok(stream) = TcpStream::connect(&peer_address).await {
                 'send_loop: loop {
@@ -84,7 +70,6 @@ pub struct ClientConnector {
     recover_txs: Vec<Sender<()>>,
     request_system_msg_handle_tx: Sender<SystemRegisterCommand>,
     system_recovered_rx: Receiver<u8>,
-    connection_handles: Vec<JoinHandle<()>>,
 }
 
 impl ClientConnector {
@@ -96,7 +81,6 @@ impl ClientConnector {
         let n_connections = (config.public.tcp_locations.len() - 1) as usize;
         let mut msg_txs = Vec::with_capacity(n_connections);
         let mut recover_txs = Vec::with_capacity(n_connections);
-        let mut connection_handles = Vec::with_capacity(n_connections);
 
         for process in 0..n_connections {
             if process == (config.public.self_rank - 1) as usize {
@@ -114,9 +98,9 @@ impl ClientConnector {
                 msg_queue: msg_rx,
                 recover_rx,
             };
-            connection_handles.push(tokio::spawn(async move {
+            tokio::spawn(async move {
                 connection.run().await;
-            }));
+            });
         }
 
         ClientConnector {
@@ -126,7 +110,6 @@ impl ClientConnector {
             recover_txs,
             request_system_msg_handle_tx,
             system_recovered_rx,
-            connection_handles,
         }
     }
 

@@ -1,5 +1,4 @@
 pub mod arworker;
-pub mod messenger;
 pub mod tcp_connector;
 pub mod run_manager;
 pub mod sector_storage;
