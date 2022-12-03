@@ -3,16 +3,28 @@ use log::debug;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
+use std::marker::Send;
 use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::atomic_register_public::*;
-use crate::domain::*;
-use crate::register_client_public::RegisterClient;
-use crate::sectors_manager_public::*;
-use crate::stable_storage_public::*;
+use crate::build_atomic_register;
+use crate::AtomicRegister;
 use crate::Broadcast;
+use crate::ClientCommandHeader;
+use crate::ClientRegisterCommand;
+use crate::ClientRegisterCommandContent;
+use crate::OperationReturn;
+use crate::OperationSuccess;
+use crate::RegisterClient;
+use crate::SectorIdx;
+use crate::SectorVec;
+use crate::SectorsManager;
+use crate::StableStorage;
+use crate::SystemCommandHeader;
+use crate::SystemRegisterCommand;
+use crate::SystemRegisterCommandContent;
+use crate::domain;
 
 pub struct AtomicRegisterInstance {
     self_ident: u8,
@@ -32,6 +44,7 @@ pub struct AtomicRegisterInstance {
     success_callback: Option<
         Box<dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
     >,
+    request_identifier: Option<u64>,
 }
 
 impl AtomicRegisterInstance {
@@ -58,6 +71,7 @@ impl AtomicRegisterInstance {
             readval: None,
             write_phase: false,
             success_callback: None,
+            request_identifier: None,
         }
     }
 
@@ -128,6 +142,153 @@ impl AtomicRegisterInstance {
             })
             .await;
     }
+
+    async fn system_read_proc(&self, header: SystemCommandHeader) {
+        let (ts, wr) = self.sectors_manager.read_metadata(header.sector_idx).await;
+        let val = self.sectors_manager.read_data(header.sector_idx).await;
+        let system_msg = SystemRegisterCommand {
+            header: SystemCommandHeader {
+                process_identifier: self.self_ident,
+                msg_ident: self.self_id,
+                read_ident: header.read_ident,
+                sector_idx: header.sector_idx,
+            },
+            content: SystemRegisterCommandContent::Value {
+                timestamp: ts,
+                write_rank: wr,
+                sector_data: val,
+            },
+        };
+
+        self.register_client
+            .send(crate::Send {
+                cmd: Arc::new(system_msg),
+                target: header.process_identifier,
+            })
+            .await;
+    }
+
+    async fn system_write_proc(
+        &mut self,
+        header: SystemCommandHeader,
+        ts: u64,
+        wr: u8,
+        v: SectorVec,
+    ) {
+        let (curr_ts, curr_wr) = self.sectors_manager.read_metadata(header.sector_idx).await;
+
+        if (ts, wr) > (curr_ts, curr_wr) {
+            self.sectors_manager
+                .write(header.sector_idx, &(v, ts, wr))
+                .await;
+        }
+
+        let system_msg = SystemRegisterCommand {
+            header: SystemCommandHeader {
+                process_identifier: self.self_ident,
+                msg_ident: self.self_id,
+                read_ident: header.read_ident,
+                sector_idx: header.sector_idx,
+            },
+            content: SystemRegisterCommandContent::Ack,
+        };
+
+        self.register_client
+            .send(crate::Send {
+                cmd: Arc::new(system_msg),
+                target: header.process_identifier,
+            })
+            .await;
+    }
+
+    async fn system_value(&mut self, header: SystemCommandHeader, ts: u64, wr: u8, v: SectorVec) {
+        let rid = self.get_rid().await;
+        if !(rid == header.read_ident && !self.write_phase) {
+            return;
+        }
+
+        self.readlist.insert(header.process_identifier, (ts, wr, v));
+        // readlist[self] should be received by broadcasting VALUES to ourselves
+        if !self.readlist.contains_key(&self.self_ident) {
+            return;
+        }
+        // >= not < beacuse we set readlist[self] also by receiving VALUE from ourselves
+        if self.readlist.len() as u8 >= self.processes_count / 2 && (self.reading || self.writing) {
+            let mut sorted: Vec<(u64, u8, SectorVec)> =
+                self.readlist.drain().map(|(_, v)| v).collect();
+            sorted.sort_by(|(lsh_ts, lhs_wr, _), (rhs_ts, rhs_wr, _)| {
+                (lsh_ts, lhs_wr).cmp(&(rhs_ts, rhs_wr))
+            });
+
+            let (maxts, rr, new_readval) = sorted.pop().unwrap();
+            self.readval = Some(new_readval);
+            self.readlist.clear();
+            self.acklist.clear();
+            self.write_phase = true;
+
+            let header = SystemCommandHeader {
+                process_identifier: self.self_ident,
+                msg_ident: self.self_id,
+                read_ident: rid,
+                sector_idx: header.sector_idx,
+            };
+            let content = match self.reading {
+                true => SystemRegisterCommandContent::WriteProc {
+                    timestamp: maxts,
+                    write_rank: rr,
+                    data_to_write: self.readval.clone().unwrap(),
+                },
+                false => {
+                    // Do not store(ts, wr, val) here because it may cause race condition, instead store it when received broadcasted WRITE_PROC
+                    SystemRegisterCommandContent::WriteProc {
+                        timestamp: maxts + 1,
+                        write_rank: self.self_ident,
+                        data_to_write: self
+                            .writeval
+                            .clone()
+                            .expect("Error in algorithm logic, writeval not set"),
+                    }
+                }
+            };
+
+            let system_msg = SystemRegisterCommand { header, content };
+
+            self.register_client
+                .broadcast(Broadcast {
+                    cmd: Arc::new(system_msg),
+                })
+                .await;
+        }
+    }
+
+    async fn system_ack(&mut self, header: SystemCommandHeader) {
+        let rid = self.get_rid().await;
+        if !(rid == header.read_ident && self.write_phase) {
+            return;
+        }
+
+        self.acklist.insert(header.process_identifier);
+        if self.acklist.len() as u8 > self.processes_count / 2 && (self.reading || self.writing) {
+            self.acklist.clear();
+            self.write_phase = false;
+            let op_return = match self.reading {
+                true => {
+                    self.reading = false;
+                    OperationReturn::Read(domain::ReadReturn { read_data: self.readval.take().unwrap() })
+                },
+                false => {
+                    self.writing = false;
+                    OperationReturn::Write
+                },
+            };
+
+            let op_success = OperationSuccess {
+                request_identifier: self.request_identifier.take().unwrap(),
+                op_return,
+            };
+            self.success_callback.take().unwrap()(op_success).await;
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -140,6 +301,7 @@ impl AtomicRegister for AtomicRegisterInstance {
         >,
     ) {
         self.success_callback = Some(success_callback);
+        self.request_identifier = Some(cmd.header.request_identifier);
 
         match cmd.content {
             ClientRegisterCommandContent::Read => {
@@ -152,7 +314,30 @@ impl AtomicRegister for AtomicRegisterInstance {
     }
 
     async fn system_command(&mut self, cmd: SystemRegisterCommand) {
-        unimplemented!();
+        match cmd.content {
+            SystemRegisterCommandContent::ReadProc => {
+                self.system_read_proc(cmd.header).await;
+            }
+            SystemRegisterCommandContent::Value {
+                timestamp,
+                write_rank,
+                sector_data,
+            } => {
+                self.system_value(cmd.header, timestamp, write_rank, sector_data)
+                    .await;
+            }
+            SystemRegisterCommandContent::WriteProc {
+                timestamp,
+                write_rank,
+                data_to_write,
+            } => {
+                self.system_write_proc(cmd.header, timestamp, write_rank, data_to_write)
+                    .await;
+            }
+            SystemRegisterCommandContent::Ack => {
+
+            }
+        }
     }
 }
 
