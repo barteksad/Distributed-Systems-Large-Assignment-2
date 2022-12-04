@@ -108,7 +108,7 @@ pub mod sectors_manager_public {
 }
 
 pub mod transfer_public {
-    use crate::RegisterCommand;
+    use crate::{RegisterCommand, implementation::utils::detect_and_deserialize_register_command};
     use std::io::Error;
     use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -117,7 +117,7 @@ pub mod transfer_public {
         hmac_system_key: &[u8; 64],
         hmac_client_key: &[u8; 32],
     ) -> Result<(RegisterCommand, bool), Error> {
-        unimplemented!()
+        detect_and_deserialize_register_command(data, hmac_system_key, hmac_client_key).await
     }
 
     pub async fn serialize_register_command(

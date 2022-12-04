@@ -28,9 +28,10 @@ impl Connection {
         let mut not_send: VecDeque<Vec<u8>> = VecDeque::with_capacity(256);
         loop {
             if let Ok(stream) = TcpStream::connect(&peer_address).await {
+                let (_, write_half) = stream.into_split();
                 'send_loop: loop {
                     while !not_send.is_empty() {
-                        if stubborn_send(&stream, not_send.front().unwrap()).await {
+                        if stubborn_send(&write_half, not_send.front().unwrap()).await {
                             not_send.pop_front();
                         } else {
                             break 'send_loop;
@@ -38,7 +39,7 @@ impl Connection {
                     }
 
                     if let Ok(msg) = self.msg_queue.recv().await {
-                        if !stubborn_send(&stream, &msg).await {
+                        if !stubborn_send(&write_half, &msg).await {
                             not_send.push_back(msg);
                             break 'send_loop;
                         }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_channel::{bounded, Sender};
 use log::debug;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, tcp::OwnedWriteHalf};
 
 use crate::{
     deserialize_register_command, ClientRegisterCommand, ClientRegisterCommandContent,
@@ -78,13 +78,18 @@ impl TCPConnector {
 
     async fn system_message_handle(
         &self,
-        mut socket: TcpStream,
+        socket: TcpStream,
         mut system_msg: SystemRegisterCommand,
         mut hmac_valid: bool,
     ) {
         self.system_recovered_tx.send(system_msg.header.process_identifier).await.unwrap();
         
+        let peer_address = socket.peer_addr();
+        let (read_half, _) = socket.into_split();
+        let mut read_buff = tokio::io::BufReader::new(read_half);
+
         loop {
+            // TODO check sector index and process rank
             if hmac_valid {
                 self.request_system_msg_handle_tx
                     .send(system_msg)
@@ -93,13 +98,13 @@ impl TCPConnector {
             } else {
                 debug!(
                     "Invalid hmac in system message from: {:?}",
-                    socket.peer_addr()
+                    peer_address
                 );
             }
 
             if let Ok((RegisterCommand::System(new_system_msg), new_hmac_valid)) =
                 deserialize_register_command(
-                    &mut socket,
+                    &mut read_buff,
                     &self.hmac_system_key,
                     &self.hmac_client_key,
                 )
@@ -107,7 +112,7 @@ impl TCPConnector {
             {
                 system_msg = new_system_msg;
                 hmac_valid = new_hmac_valid;
-                debug!("New system message from: {:?}", socket.peer_addr());
+                debug!("New system message from: {:?}", peer_address);
             } else {
                 return;
             }
@@ -116,10 +121,13 @@ impl TCPConnector {
 
     async fn client_message_handle(
         &self,
-        mut socket: TcpStream,
+        socket: TcpStream,
         mut client_msg: ClientRegisterCommand,
         mut hmac_valid: bool,
     ) {
+        let (read_half, mut write_half) = socket.into_split();
+        let mut read_buff = tokio::io::BufReader::new(read_half);
+
         loop {
             let mut op_return: Option<OperationReturn> = None;
             let request_identifier = client_msg.header.request_identifier;
@@ -148,7 +156,7 @@ impl TCPConnector {
             }
 
             self.send_client_response(
-                &socket,
+                &mut write_half,
                 status_code,
                 op_return,
                 msg_type,
@@ -157,7 +165,7 @@ impl TCPConnector {
 
             if let Ok((RegisterCommand::Client(new_client_msg), new_hmac_valid)) =
                 deserialize_register_command(
-                    &mut socket,
+                    &mut read_buff,
                     &self.hmac_system_key,
                     &self.hmac_client_key,
                 )
@@ -165,7 +173,7 @@ impl TCPConnector {
             {
                 client_msg = new_client_msg;
                 hmac_valid = new_hmac_valid;
-                debug!("New client message from: {:?}", socket.peer_addr());
+                debug!("New client message from: {:?}", write_half.peer_addr());
             } else {
                 return;
             }
@@ -174,7 +182,7 @@ impl TCPConnector {
 
     async fn send_client_response(
         &self,
-        socket: &TcpStream,
+        socket: &mut OwnedWriteHalf, 
         status_code: StatusCode,
         op_return: Option<OperationReturn>,
         msg_type: u8,
