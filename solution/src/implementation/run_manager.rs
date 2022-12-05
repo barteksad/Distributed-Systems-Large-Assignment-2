@@ -112,13 +112,11 @@ impl RunManager {
     }
 
     pub async fn run(mut self) {
-        let new_client_msg = self.request_client_msg_handle_rx.recv();
-        tokio::pin!(new_client_msg);
         loop {
 
             tokio::select! {
                 // Send new client message to be handeled if there is ARWorker ready to do so
-                Ok((client_msg, result_tx)) = &mut new_client_msg, if !self.ready_for_client.is_empty() => {
+                Ok((client_msg, result_tx)) = self.request_client_msg_handle_rx.recv(), if !self.ready_for_client.is_empty() => {
                     assert!(!self.ready_for_client.is_empty());
                     let uuid = self.ready_for_client.pop().unwrap();
                     if let Some(tx) = self.uuid2client_msg_tx.get(&uuid) {
@@ -166,18 +164,6 @@ impl RunManager {
                             self.sector2rw.remove(&sector_idx);
                         }
                     }
-                }
-                Err(e) = self.request_client_msg_handle_rx.recv() => {
-                    debug!("Error receiving client message: {:?}", e);
-                }
-                Err(e) = self.request_system_msg_handle_rx.recv() => {
-                    debug!("Error receiving system message: {:?}", e);
-                }
-                Err(e) = self.client_msg_finished_rx.recv() => {
-                    debug!("Error receiving client message finished: {:?}", e);
-                }
-                Err(e) = self.system_msg_finished_rx.recv() => {
-                    debug!("Error receiving system message finished: {:?}", e);
                 }
             }
         }
