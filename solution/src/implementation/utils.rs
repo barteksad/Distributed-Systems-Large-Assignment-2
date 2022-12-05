@@ -126,6 +126,11 @@ async fn deserialize_client_command(
         .await
         .map_err(|e| DeserializeError::IoError(e))?;
     mac.update(&buff);
+    // Check before deserialize to read exact amonut of bytes
+    let hmac_valid = check_hmac_valid(mac, data)
+        .await
+        .map_err(|e| DeserializeError::IoError(e))?;
+
     let request_identifier = u64::from_be_bytes(buff[0..8].try_into().or(Err(
         DeserializeError::Other("invalid request_identifier".to_string()),
     ))?);
@@ -146,9 +151,6 @@ async fn deserialize_client_command(
     };
     let client_msg = ClientRegisterCommand { header, content };
 
-    let hmac_valid = check_hmac_valid(mac, data)
-        .await
-        .map_err(|e| DeserializeError::IoError(e))?;
     Ok((RegisterCommand::Client(client_msg), hmac_valid))
 }
 
@@ -172,6 +174,10 @@ async fn deserialize_system_command(
         .await
         .map_err(|e| DeserializeError::IoError(e))?;
     mac.update(&buff);
+    // Check before deserialize to read exact amonut of bytes
+    let hmac_valid = check_hmac_valid(mac, data)
+        .await
+        .map_err(|e| DeserializeError::IoError(e))?;
 
     let msg_ident = Uuid::from_slice(&buff[0..16]).or(Err(DeserializeError::Other(
         "invalid msg_ident".to_string(),
@@ -210,9 +216,6 @@ async fn deserialize_system_command(
     };
 
     let system_msg = SystemRegisterCommand { header, content };
-    let hmac_valid = check_hmac_valid(mac, data)
-        .await
-        .map_err(|e| DeserializeError::IoError(e))?;
 
     Ok((RegisterCommand::System(system_msg), hmac_valid))
 }
