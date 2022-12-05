@@ -69,7 +69,8 @@ pub async fn detect_and_deserialize_register_command(
     loop {
         let mut buff = vec![0u8; MAGIC_NUMBER.len()];
 
-        while buff != MAGIC_NUMBER {
+        while &buff[0..4] != MAGIC_NUMBER.as_ref() {
+            debug!("Invalid magic number {:?}, waiting for new one", buff);
             data.read_exact(&mut buff).await?;
             if buff == MAGIC_NUMBER {
                 break;
@@ -80,6 +81,7 @@ pub async fn detect_and_deserialize_register_command(
 
         match try_to_msg_type(buff[3]) {
             Some(code) if code == MessageCode::Read || code == MessageCode::Write => {
+                debug!("Detected client message");
                 let mut mac = HmacSha256::new_from_slice(hmac_client_key).unwrap();
                 mac.update(&MAGIC_NUMBER);
                 mac.update(&buff);
@@ -93,6 +95,7 @@ pub async fn detect_and_deserialize_register_command(
                 }
             }
             Some(code) => {
+                debug!("Detected system message");
                 let mut mac = HmacSha256::new_from_slice(hmac_system_key).unwrap();
                 mac.update(&MAGIC_NUMBER);
                 mac.update(&buff);
@@ -106,7 +109,10 @@ pub async fn detect_and_deserialize_register_command(
                     }
                 }
             }
-            None => continue,
+            None => {
+                debug!("Invalid message code");
+                continue;
+            },
         }
     }
 }
@@ -127,7 +133,7 @@ async fn deserialize_client_command(
         .map_err(|e| DeserializeError::IoError(e))?;
     mac.update(&buff);
     // Check before deserialize to read exact amonut of bytes
-    let hmac_valid = check_hmac_valid(mac, data)
+    let hmac_valid = check_hmac_valid(mac, data, 32)
         .await
         .map_err(|e| DeserializeError::IoError(e))?;
 
@@ -175,7 +181,7 @@ async fn deserialize_system_command(
         .map_err(|e| DeserializeError::IoError(e))?;
     mac.update(&buff);
     // Check before deserialize to read exact amonut of bytes
-    let hmac_valid = check_hmac_valid(mac, data)
+    let hmac_valid = check_hmac_valid(mac, data, 64)
         .await
         .map_err(|e| DeserializeError::IoError(e))?;
 
@@ -230,7 +236,9 @@ pub async fn detect_and_serialize_register_command(
         RegisterCommand::Client(client_msg) => {
             serialize_client_command(client_msg, writer, &mut mac).await?;
         },
-        RegisterCommand::System(system_msg) => todo!(),
+        RegisterCommand::System(system_msg) => {
+            serialize_system_command(system_msg, writer, &mut mac).await?;
+        },
     }
 
     writer.write_all(mac.finalize().into_bytes().as_slice()).await?;
@@ -277,6 +285,8 @@ async fn serialize_system_command(
         buff.extend(data_to_write.0.as_slice());
     };
 
+    mac.update(&buff);
+
     writer.write_all(&buff).await?;
 
     Ok(())
@@ -289,10 +299,10 @@ async fn serialize_client_command(
 ) -> Result<(), std::io::Error> {
     let (mut buff, msg_code) : (Vec<u8>, _) = match cmd.content {
         ClientRegisterCommandContent::Read => (Vec::with_capacity(24), MessageCode::Read),
-        ClientRegisterCommandContent::Write { .. } => (Vec::with_capacity(24 + 4096), MessageCode::Read),
+        ClientRegisterCommandContent::Write { .. } => (Vec::with_capacity(24 + 4096), MessageCode::Write),
     };
 
-    buff.extend(&MAGIC_NUMBER);
+    buff.extend_from_slice(MAGIC_NUMBER.as_ref());
     buff.extend(&[0u8; 3]);
     buff.push(msg_code as u8);
     buff.extend(cmd.header.request_identifier.to_be_bytes());
@@ -319,13 +329,13 @@ fn try_to_msg_type(value: u8) -> Option<MessageCode> {
 }
 
 async fn check_hmac_valid(
-    mat: HmacSha256,
+    mac: HmacSha256,
     data: &mut (dyn AsyncRead + Send + Unpin),
+    key_size: usize,
 ) -> Result<bool, std::io::Error> {
-    let mut buff = vec![0u8; 32];
+    let mut buff = vec![0u8; key_size];
     data.read_exact(&mut buff).await?;
-    let hmac = mat.finalize().into_bytes().to_vec();
-    Ok(hmac == buff)
+    Ok(mac.verify_slice(&buff).is_ok())
 }
 
 #[derive(Debug)]

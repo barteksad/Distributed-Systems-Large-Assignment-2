@@ -15,9 +15,7 @@ pub use transfer_public::*;
 pub async fn run_register_process(config: Configuration) {
     let tcp_listener = get_listener(&config).await;
     let mut run_manager = RunManager::new(config, tcp_listener).await;
-    tokio::spawn(async move {
-        run_manager.run().await;
-    });
+    run_manager.run().await;
 }
 
 pub mod atomic_register_public {
@@ -83,6 +81,7 @@ pub mod atomic_register_public {
 }
 
 pub mod sectors_manager_public {
+    use crate::implementation::sector_storage::SectorStorage;
     use crate::{SectorIdx, SectorVec};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -103,7 +102,7 @@ pub mod sectors_manager_public {
 
     /// Path parameter points to a directory to which this method has exclusive access.
     pub async fn build_sectors_manager(path: PathBuf) -> Arc<dyn SectorsManager> {
-        unimplemented!()
+        Arc::new(SectorStorage::new(path).await)
     }
 }
 

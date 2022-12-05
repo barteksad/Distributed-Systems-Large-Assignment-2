@@ -1,23 +1,21 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use async_channel::{bounded, unbounded, Receiver, Sender};
+use log::debug;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::{
+    build_sectors_manager,
     implementation::{arworker::ARWorker, storage_data::build_stable_storage},
-    ClientRegisterCommand, Configuration, OperationReturn, SectorIdx, SystemRegisterCommand,
-    SystemRegisterCommandContent::{Ack, ReadProc, Value, WriteProc}, RegisterClient,
+    ClientRegisterCommand, Configuration, OperationReturn, RegisterClient, SectorIdx,
+    SystemRegisterCommand,
+    SystemRegisterCommandContent::{Ack, ReadProc, Value, WriteProc},
 };
 
-use super::{
-    client_connector::ClientConnector, sector_storage::SectorStorage, tcp_connector::TCPConnector,
-};
+use super::{client_connector::ClientConnector, tcp_connector::TCPConnector};
 
-static ARWORKER_COUNT: u8 = 16;
+static ARWORKER_COUNT: u8 = 1;
 
 pub struct RunManager {
     ready_for_client: Vec<Uuid>,
@@ -41,13 +39,19 @@ impl RunManager {
             &config,
             request_client_msg_handle_tx,
             request_system_msg_handle_tx.clone(),
-            system_recovered_tx
+            system_recovered_tx,
         ));
-        tokio::spawn(async move { tcp_connector.run(tcp_listener).await });
 
-        let sectors_manager = Arc::new(SectorStorage {});
-        let register_client = Arc::new(ClientConnector::new(&config, request_system_msg_handle_tx, system_recovered_rx));
-        
+        let mut manager_path = config.public.storage_dir.clone();
+        manager_path.push(format!("sectors-manager"));
+        tokio::fs::create_dir_all(&manager_path).await.unwrap();
+        let sectors_manager = build_sectors_manager(manager_path).await;
+        let register_client = Arc::new(ClientConnector::new(
+            &config,
+            request_system_msg_handle_tx,
+            system_recovered_rx,
+        ));
+
         let (client_msg_finished_tx, client_msg_finished_rx) = unbounded::<Uuid>();
         let (system_msg_finished_tx, system_msg_finished_rx) = unbounded::<SectorIdx>();
 
@@ -58,7 +62,7 @@ impl RunManager {
         let mut uuid2system_msg_tx = HashMap::new();
 
         for i in 0..ARWORKER_COUNT {
-            let uuid = Uuid::from_u128((config.public.self_rank * ARWORKER_COUNT + i) as u128);
+            let uuid = Uuid::new_v4();
 
             let mut worker_path = config.public.storage_dir.clone();
             worker_path.push(format!("stable-storage-{}", i));
@@ -71,33 +75,33 @@ impl RunManager {
             let (client_msg_tx, client_msg_rx) =
                 bounded::<(ClientRegisterCommand, Sender<OperationReturn>)>(1);
             let (system_msg_tx, system_msg_rx) = unbounded::<SystemRegisterCommand>();
-            
+
             uuid2client_msg_tx.insert(uuid, client_msg_tx);
             uuid2system_msg_tx.insert(uuid, system_msg_tx);
 
-            let mut arworker = ARWorker::new(
-                config.public.self_rank,
+            let arworker = ARWorker::new(
+                config.public.self_rank - 1,
                 uuid,
                 stable_storage,
-                register_client.clone() as Arc<dyn RegisterClient>,
+                register_client.clone(),
                 sectors_manager.clone(),
                 config.public.tcp_locations.len() as u8,
                 client_msg_rx.clone(),
                 system_msg_rx.clone(),
                 client_msg_finished_tx.clone(),
                 system_msg_finished_tx.clone(),
-            ).await;
-            tokio::spawn(async move { arworker.run().await });
+            )
+            .await;
+            tokio::spawn(arworker.run());
         }
 
-        // tokio::spawn(async move { sectors_manager.run().await });
-        tokio::spawn(async move { register_client.run().await });
+        tokio::spawn(register_client.run());
+        tokio::spawn(tcp_connector.run(tcp_listener));
 
         RunManager {
             ready_for_client,
             ready_for_system,
             sector2rw: HashMap::new(),
-            // uuid2sector: HashMap::new(),
             request_client_msg_handle_rx,
             request_system_msg_handle_rx,
             uuid2client_msg_tx,
@@ -107,19 +111,24 @@ impl RunManager {
         }
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(mut self) {
+        let new_client_msg = self.request_client_msg_handle_rx.recv();
+        tokio::pin!(new_client_msg);
         loop {
+
             tokio::select! {
                 // Send new client message to be handeled if there is ARWorker ready to do so
-                Ok((client_msg, result_tx)) = self.request_client_msg_handle_rx.recv(), if !self.ready_for_client.is_empty() => {
+                Ok((client_msg, result_tx)) = &mut new_client_msg, if !self.ready_for_client.is_empty() => {
                     assert!(!self.ready_for_client.is_empty());
                     let uuid = self.ready_for_client.pop().unwrap();
-                    // self.uuid2sector.insert(uuid, client_msg.header.sector_idx);
-                    self.uuid2client_msg_tx.get_mut(&uuid).unwrap().send((client_msg, result_tx)).await.unwrap();
+                    if let Some(tx) = self.uuid2client_msg_tx.get(&uuid) {
+                        tx.send((client_msg, result_tx)).await.expect("Error sending client message to ARWorker");
+                    }
+                    debug!("Assigned client message to ARWorker {:?}", uuid);
                 }
                 // Client message handling finished
                 Ok(uuid) = self.client_msg_finished_rx.recv() => {
-                    // assert!(self.uuid2sector.remove(&uuid).is_some());
+                    debug!("ARWorker {:?} finished client message handling", uuid);
                     self.ready_for_client.push(uuid);
                 }
                 // Send new system message to be handeled if there is ARWorker ready to do so
@@ -129,29 +138,54 @@ impl RunManager {
                     match system_msg.content {
                         Value { .. } | Ack => {
                             let uuid = &system_msg.header.msg_ident;
-                            self.uuid2system_msg_tx.get(uuid).unwrap().send(system_msg).await.unwrap();
+                            if let Some(tx) = self.uuid2system_msg_tx.get(uuid) {
+                                tx.send(system_msg).await.unwrap();
+                            };
                         }
-                        ReadProc | WriteProc { .. } => {    
+                        ReadProc | WriteProc { .. } => {
                             if let Some((rw_count, uuid)) = self.sector2rw.get_mut(&sector_idx) {
                                 *rw_count += 1;
-                                self.uuid2system_msg_tx.get_mut(uuid).unwrap().send(system_msg).await.unwrap();
+                                if let Some(tx) = self.uuid2system_msg_tx.get(uuid){
+                                    tx.send(system_msg).await.unwrap();
+                                };
                             } else {
                                 let uuid = self.ready_for_system.pop().unwrap();
                                 self.sector2rw.insert(sector_idx, (1, uuid));
-                                self.uuid2system_msg_tx.get_mut(&uuid).unwrap().send(system_msg).await.unwrap();
+                                if let Some(tx) = self.uuid2system_msg_tx.get(&uuid){
+                                    tx.send(system_msg).await.unwrap()
+                                };
                             }
                         }
                     }
                 }
                 Ok(sector_idx) = self.system_msg_finished_rx.recv() => {
-                    let (rw_count, uuid) = self.sector2rw.get_mut(&sector_idx).unwrap();
-                    *rw_count -= 1;
-                    if *rw_count == 0 {
-                        self.ready_for_system.push(*uuid);
-                        self.sector2rw.remove(&sector_idx);
+                    if let Some((rw_count, uuid)) = self.sector2rw.get_mut(&sector_idx) {
+                        *rw_count -= 1;
+                        if *rw_count == 0 {
+                            self.ready_for_system.push(*uuid);
+                            self.sector2rw.remove(&sector_idx);
+                        }
                     }
+                }
+                Err(e) = self.request_client_msg_handle_rx.recv() => {
+                    debug!("Error receiving client message: {:?}", e);
+                }
+                Err(e) = self.request_system_msg_handle_rx.recv() => {
+                    debug!("Error receiving system message: {:?}", e);
+                }
+                Err(e) = self.client_msg_finished_rx.recv() => {
+                    debug!("Error receiving client message finished: {:?}", e);
+                }
+                Err(e) = self.system_msg_finished_rx.recv() => {
+                    debug!("Error receiving system message finished: {:?}", e);
                 }
             }
         }
+    }
+}
+
+impl Drop for RunManager {
+    fn drop(&mut self) {
+        debug!("Dropping RunManager");
     }
 }

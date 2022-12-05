@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_channel::{bounded, unbounded, Receiver, Sender};
+use log::debug;
 use tokio::net::TcpStream;
 
 use crate::{
@@ -23,39 +24,58 @@ struct Connection {
 }
 
 impl Connection {
-    async fn run(&mut self) {
+    async fn run(self) {
         let peer_address = format!("{}:{}", self.host, self.port);
         let mut not_send: VecDeque<Vec<u8>> = VecDeque::with_capacity(256);
         loop {
-            if let Ok(stream) = TcpStream::connect(&peer_address).await {
-                let (_, write_half) = stream.into_split();
-                'send_loop: loop {
-                    while !not_send.is_empty() {
-                        if stubborn_send(&write_half, not_send.front().unwrap()).await {
-                            not_send.pop_front();
-                        } else {
-                            break 'send_loop;
+            match TcpStream::connect(&peer_address).await {
+                Ok(stream) => {
+                    stream.set_nodelay(true).unwrap();
+                    let (_, write_half) = stream.into_split();
+                    'send_loop: loop {
+                        while !not_send.is_empty() {
+                            if stubborn_send(&write_half, not_send.front().unwrap()).await {
+                                not_send.pop_front();
+                            } else {
+                                break 'send_loop;
+                            }
                         }
-                    }
 
-                    if let Ok(msg) = self.msg_queue.recv().await {
-                        if !stubborn_send(&write_half, &msg).await {
-                            not_send.push_back(msg);
-                            break 'send_loop;
+                        if let Ok(msg) = self.msg_queue.recv().await {
+                            if !stubborn_send(&write_half, &msg).await {
+                                not_send.push_back(msg);
+                                break 'send_loop;
+                            }
                         }
                     }
+                }
+                Err(e) => {
+                    debug!("Connection to {} failed: {:?}", peer_address, e);
                 }
             }
 
             'recover_wait_loop: loop {
                 tokio::select! {
-                    _ = self.recover_rx.recv() => {
-                        break 'recover_wait_loop;
+                    rx_signal = self.recover_rx.recv() => match rx_signal {
+                        Ok(()) => {
+                            debug!("Connection to {} recovered", peer_address);
+                            break 'recover_wait_loop;
+                        },
+                        Err(e) => {
+                            debug!("Error in recover_rx.recv: {:?}", e);
+                            break 'recover_wait_loop;
+                        }
                     },
-                    Ok(msg) = self.msg_queue.recv() => {
-                        not_send.push_back(msg);
-                        if not_send.len() > MAX_NOT_SEND_MSG_COUNT {
-                            not_send.pop_front();
+                    maybe_msg = self.msg_queue.recv() => match maybe_msg {
+                        Ok(msg) => {
+                            not_send.push_back(msg);
+                            if not_send.len() > MAX_NOT_SEND_MSG_COUNT {
+                                not_send.pop_front();
+                            }
+                        },
+                        Err(e) => {
+                            debug!("Error in msg_queue.recv: {:?}", e);
+                            break 'recover_wait_loop;
                         }
                     }
                 };
@@ -88,20 +108,18 @@ impl ClientConnector {
                 continue;
             }
 
-            let (host, port) = config.public.tcp_locations.get(process).unwrap().clone();
+            let (host, port) = config.public.tcp_locations.get(process).unwrap();
             let (msg_tx, msg_rx) = unbounded();
             let (recover_tx, recover_rx) = bounded(1);
             msg_txs.push(msg_tx);
             recover_txs.push(recover_tx);
-            let mut connection = Connection {
-                host,
-                port,
+            let connection = Connection {
+                host: host.to_string(),
+                port: *port,
                 msg_queue: msg_rx,
                 recover_rx,
             };
-            tokio::spawn(async move {
-                connection.run().await;
-            });
+            tokio::spawn(connection.run());
         }
 
         ClientConnector {
@@ -122,15 +140,12 @@ impl ClientConnector {
         }
     }
 
-    pub async fn run(&self) {
+    pub async fn run(self: Arc<Self>) {
         loop {
             let process = self.system_recovered_rx.recv().await.unwrap();
-            self.recover_txs
-                .get(self.process2index(process))
-                .unwrap()
-                .send(())
-                .await
-                .unwrap();
+            if let Some(tx) = self.recover_txs.get(self.process2index(process)) {
+                tx.send(()).await.unwrap();
+            }
         }
     }
 }
@@ -139,6 +154,8 @@ impl ClientConnector {
 impl RegisterClient for ClientConnector {
     /// Sends a system message to a single process.
     async fn send(&self, msg: Send) {
+        debug!("Sending system message to process {}", msg.target);
+
         if msg.target == self.self_rank {
             self.request_system_msg_handle_tx
                 .send(Arc::try_unwrap(msg.cmd).unwrap())
@@ -156,11 +173,17 @@ impl RegisterClient for ClientConnector {
         )
         .await
         .expect("Error serializing register command!");
-        self.msg_txs.get(process).unwrap().send(buff).await.unwrap();
+
+        if let Some(tx) = self.msg_txs.get(process) {
+            tx.send(buff).await.unwrap();
+        };
+
+        debug!("Successfully send system message to process {}", msg.target);
     }
 
     /// Broadcasts a system message to all processes in the system, including self.
     async fn broadcast(&self, msg: Broadcast) {
+        debug!("Broadcasting message to {} processes", self.msg_txs.len());
         let cmd = Arc::try_unwrap(msg.cmd).expect("Error unwraping msg Broadcast");
         self.request_system_msg_handle_tx
             .send(cmd.clone())
@@ -178,5 +201,15 @@ impl RegisterClient for ClientConnector {
         for tx in self.msg_txs.iter() {
             tx.send(buff.clone()).await.unwrap();
         }
+        debug!(
+            "Successfully broadcasted message to {} processes",
+            self.msg_txs.len()
+        );
+    }
+}
+
+impl Drop for ClientConnector {
+    fn drop(&mut self) {
+        debug!("Dropping ClientConnector");
     }
 }

@@ -211,8 +211,8 @@ impl AtomicRegisterInstance {
         if !self.readlist.contains_key(&self.self_ident) {
             return;
         }
-        // >= not < beacuse we set readlist[self] also by receiving VALUE from ourselves
-        if self.readlist.len() as u8 >= self.processes_count / 2 && (self.reading || self.writing) {
+        // >= not > beacuse we set readlist[self] also by receiving VALUE from ourselves
+        if self.readlist.len() as u8 >= (self.processes_count / 2) + self.processes_count % 2 && (self.reading || self.writing) {
             let mut sorted: Vec<(u64, u8, SectorVec)> =
                 self.readlist.drain().map(|(_, v)| v).collect();
             sorted.sort_by(|(lsh_ts, lhs_wr, _), (rhs_ts, rhs_wr, _)| {
@@ -267,7 +267,12 @@ impl AtomicRegisterInstance {
         }
 
         self.acklist.insert(header.process_identifier);
-        if self.acklist.len() as u8 > self.processes_count / 2 && (self.reading || self.writing) {
+
+        if !self.acklist.contains(&self.self_ident) {
+            return
+        }
+
+        if self.acklist.len() as u8 >= (self.processes_count / 2) + self.processes_count % 2 && (self.reading || self.writing) {
             self.acklist.clear();
             self.write_phase = false;
             let op_return = match self.reading {
@@ -299,6 +304,7 @@ impl AtomicRegister for AtomicRegisterInstance {
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         >,
     ) {
+        debug!("ARWorker received client command");
         self.success_callback = Some(success_callback);
         self.request_identifier = Some(cmd.header.request_identifier);
 
@@ -381,23 +387,25 @@ impl ARWorker {
         }
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(mut self) {
         loop {
             tokio::select! {
                 Ok((client_msg, result_tx)) = self.client_msg_rx.recv() => {
                     self.handle_client_command(client_msg, result_tx).await;
-                    self.client_msg_finished_tx.send(self.self_id).await.unwrap();
-                }
-                Err(e) = self.client_msg_rx.recv() => {
-                    debug!("Error in ARWorker client_rx.recv: {:?}", e);
+                    self.client_msg_finished_tx.send(self.self_id).await.expect("Error");
                 }
                 Ok(system_msg) = self.system_msg_rx.recv() => {
                     let sector_idx = system_msg.header.sector_idx;
                     self.ar.system_command(system_msg).await;
-                    self.system_msg_finished_tx.send(sector_idx).await.unwrap();
+                    self.system_msg_finished_tx.send(sector_idx).await.expect("Error");
                 }
                 Err(e) = self.system_msg_rx.recv() => {
                     debug!("Error in ARWorker system_rx.recv: {:?}", e);
+                    panic!();
+                }
+                Err(e) = self.client_msg_rx.recv() => {
+                    debug!("Error in ARWorker client_msg_rx.recv: {:?}", e);
+                    panic!();
                 }
             }
         }
@@ -408,16 +416,24 @@ impl ARWorker {
         client_msg: ClientRegisterCommand,
         result_tx: Sender<OperationReturn>,
     ) {
+        debug!("BEFORE");
         let success_callback: Box<
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         > = Box::new(move |operation_success: OperationSuccess| {
             Box::pin(async move {
+                debug!("IF CLOSED: {:?}, {:?}, {:?}", result_tx.is_closed(), result_tx.receiver_count(), result_tx.sender_count());
                 if let Err(e) = result_tx.send(operation_success.op_return).await {
                     debug!("Error in ARWorker result_tx.send: {:?}", e);
                 }
             })
         });
-
+        debug!("ARWorker: client_command: {:?}", client_msg.header.request_identifier);
         self.ar.client_command(client_msg, success_callback).await
+    }
+}
+
+impl Drop for ARWorker {
+    fn drop(&mut self) {
+        debug!("Dropping ARWorker");
     }
 }

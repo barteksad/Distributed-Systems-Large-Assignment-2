@@ -47,7 +47,7 @@ impl StableStorage for StorageData {
         )
             .await {
                 Ok(_) => {
-                    let dstdir = tokio::fs::File::open(self.root_storage_dir.clone()).await.unwrap();
+                    let dstdir = tokio::fs::File::open(&self.root_storage_dir).await.unwrap();
                     tokio::fs::File::sync_data(&dstdir).await.unwrap();
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),

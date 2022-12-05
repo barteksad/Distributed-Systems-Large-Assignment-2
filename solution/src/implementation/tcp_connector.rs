@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_channel::{bounded, Sender};
 use log::debug;
-use tokio::net::{TcpListener, TcpStream, tcp::OwnedWriteHalf};
+use tokio::net::{tcp::OwnedWriteHalf, TcpListener, TcpStream};
 
 use crate::{
     deserialize_register_command, ClientRegisterCommand, ClientRegisterCommandContent,
@@ -22,7 +22,7 @@ pub struct TCPConnector {
 }
 
 pub async fn get_listener(config: &Configuration) -> TcpListener {
-    let self_rank = config.public.self_rank;
+    let self_rank = config.public.self_rank - 1;
     let (host, port) = config.public.tcp_locations.get(self_rank as usize).unwrap();
     TcpListener::bind(format!("{}:{}", host, port).to_string())
         .await
@@ -49,6 +49,7 @@ impl TCPConnector {
     pub async fn run(self: Arc<Self>, listener: TcpListener) {
         loop {
             if let Ok((mut socket, addr)) = listener.accept().await {
+                socket.set_nodelay(true).unwrap();
                 debug!("TCPConnector new connection from {:?}", addr);
                 let me = self.clone();
                 tokio::spawn(async move {
@@ -72,6 +73,8 @@ impl TCPConnector {
                         }
                     }
                 });
+            } else {
+                debug!("Error in TcpListener during new connection");
             }
         }
     }
@@ -82,8 +85,11 @@ impl TCPConnector {
         mut system_msg: SystemRegisterCommand,
         mut hmac_valid: bool,
     ) {
-        self.system_recovered_tx.send(system_msg.header.process_identifier).await.unwrap();
-        
+        self.system_recovered_tx
+            .send(system_msg.header.process_identifier)
+            .await
+            .unwrap();
+
         let peer_address = socket.peer_addr();
         let (read_half, _) = socket.into_split();
         let mut read_buff = tokio::io::BufReader::new(read_half);
@@ -96,10 +102,7 @@ impl TCPConnector {
                     .await
                     .unwrap();
             } else {
-                debug!(
-                    "Invalid hmac in system message from: {:?}",
-                    peer_address
-                );
+                debug!("Invalid hmac in system message from: {:?}", peer_address);
             }
 
             if let Ok((RegisterCommand::System(new_system_msg), new_hmac_valid)) =
@@ -114,6 +117,7 @@ impl TCPConnector {
                 hmac_valid = new_hmac_valid;
                 debug!("New system message from: {:?}", peer_address);
             } else {
+                debug!("Error in TcpListener during system message");
                 return;
             }
         }
@@ -135,33 +139,42 @@ impl TCPConnector {
                 ClientRegisterCommandContent::Read => 0x41,
                 ClientRegisterCommandContent::Write { .. } => 0x42,
             };
-            let status_code = match (hmac_valid, client_msg.header.sector_idx < self.n_sectors) {
+            let status_code = match (hmac_valid, client_msg.header.sector_idx <= self.n_sectors) {
                 (false, _) => StatusCode::AuthFailure,
                 (_, false) => StatusCode::InvalidSectorIndex,
                 _ => StatusCode::Ok,
             };
 
             if status_code == StatusCode::Ok {
+                debug!(
+                    "New client message from: {:?}",
+                    write_half.peer_addr()
+                );
                 let (result_tx, result_rx) = bounded(2);
                 self.request_client_msg_handle_tx
                     .send((client_msg, result_tx))
                     .await
-                    .unwrap();
-
-                if let Ok(received_op_return) = result_rx.recv().await {
-                    op_return = Some(received_op_return);
-                }
-
-                assert!(op_return.is_some());
+                    .expect("Error sending client message to request handler");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                debug!("CLOSED: {:?}, {:?}, {:?}", result_rx.is_closed(), result_rx.receiver_count(), result_rx.sender_count());
+                op_return = Some(result_rx.recv().await.unwrap());
+            } else {
+                debug!(
+                    "Invalid client message from client at: {:?}, status_code: {:?}",
+                    write_half.peer_addr(),
+                    status_code
+                );
             }
 
-            self.send_client_response(
+            send_client_response(
                 &mut write_half,
                 status_code,
                 op_return,
                 msg_type,
                 request_identifier,
-            ).await;
+                &self.hmac_client_key,
+            )
+            .await;
 
             if let Ok((RegisterCommand::Client(new_client_msg), new_hmac_valid)) =
                 deserialize_register_command(
@@ -180,33 +193,41 @@ impl TCPConnector {
         }
     }
 
-    async fn send_client_response(
-        &self,
-        socket: &mut OwnedWriteHalf, 
-        status_code: StatusCode,
-        op_return: Option<OperationReturn>,
-        msg_type: u8,
-        request_identifier: u64,
-    ) {
-        let mut header_buff = Vec::<u8>::with_capacity(16);
-        let (mut content_buff, content) = match op_return {
-            None => (vec![0u8; 0], None),
-            Some(OperationReturn::Read(read_ret)) => {
-                (Vec::<u8>::with_capacity(4096), Some(read_ret))
-            }
-            Some(OperationReturn::Write) => (Vec::<u8>::with_capacity(0), None),
-        };
+}
 
-        header_buff.extend(&MAGIC_NUMBER);
-        header_buff.extend([0u8, 0u8]); // Padding
-        header_buff.push(status_code as u8);
-        header_buff.push(msg_type);
-        header_buff.extend(request_identifier.to_be_bytes());
-        if let Some(reat_ret) = content {
-            content_buff.extend(reat_ret.read_data.0);
-        };
-        let hmac_tag = add_hmac_tag(&header_buff, &content_buff, &self.hmac_client_key);
-        let data = [header_buff, content_buff, hmac_tag].concat();
-        stubborn_send(socket, &data[..]).await;
+async fn send_client_response(
+    socket: &mut OwnedWriteHalf,
+    status_code: StatusCode,
+    op_return: Option<OperationReturn>,
+    msg_type: u8,
+    request_identifier: u64,
+    hmac_client_key: &[u8; 32]
+) {
+    debug!("Sending client response: {:?}", status_code);
+    let mut header_buff = Vec::<u8>::with_capacity(16);
+    let (mut content_buff, content) = match op_return {
+        None => (vec![0u8; 0], None),
+        Some(OperationReturn::Read(read_ret)) => {
+            (Vec::<u8>::with_capacity(4096), Some(read_ret))
+        }
+        Some(OperationReturn::Write) => (Vec::<u8>::with_capacity(0), None),
+    };
+
+    header_buff.extend(&MAGIC_NUMBER);
+    header_buff.extend([0u8, 0u8]); // Padding
+    header_buff.push(status_code as u8);
+    header_buff.push(msg_type);
+    header_buff.extend(request_identifier.to_be_bytes());
+    if let Some(reat_ret) = content {
+        content_buff.extend(reat_ret.read_data.0);
+    };
+    let hmac_tag = add_hmac_tag(&header_buff, &content_buff, hmac_client_key);
+    let data = [header_buff, content_buff, hmac_tag].concat();
+    stubborn_send(socket, &data[..]).await;
+}
+
+impl Drop for TCPConnector {
+    fn drop(&mut self) {
+        debug!("Dropping TCPConnector");
     }
 }
