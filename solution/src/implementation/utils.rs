@@ -4,7 +4,7 @@ use hmac::{Hmac, Mac};
 use log::debug;
 use sha2::Sha256;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::tcp::OwnedWriteHalf,
     time::{sleep, Instant},
 };
@@ -218,6 +218,92 @@ async fn deserialize_system_command(
     let system_msg = SystemRegisterCommand { header, content };
 
     Ok((RegisterCommand::System(system_msg), hmac_valid))
+}
+
+pub async fn detect_and_serialize_register_command(
+    cmd: &RegisterCommand,
+    writer: &mut (dyn AsyncWrite + Send + Unpin),
+    hmac_key: &[u8],
+) -> Result<(), std::io::Error> {
+    let mut mac = HmacSha256::new_from_slice(hmac_key).unwrap();
+    match cmd {
+        RegisterCommand::Client(client_msg) => {
+            serialize_client_command(client_msg, writer, &mut mac).await?;
+        },
+        RegisterCommand::System(system_msg) => todo!(),
+    }
+
+    writer.write_all(mac.finalize().into_bytes().as_slice()).await?;
+
+    Ok(())
+}
+
+async fn serialize_system_command(
+    cmd: &SystemRegisterCommand,
+    writer: &mut (dyn AsyncWrite + Send + Unpin),
+    mac: &mut HmacSha256,
+) -> Result<(), std::io::Error> {
+    let (mut buff, msg_code) :(Vec<u8>, _) = match cmd.content {
+        SystemRegisterCommandContent::ReadProc => {
+            (Vec::with_capacity(40), MessageCode::ReadProc)
+        }
+        SystemRegisterCommandContent::Value { .. } => {
+            (Vec::with_capacity(40 + 16 + 4096), MessageCode::VALUE)
+        }
+        SystemRegisterCommandContent::WriteProc { .. } => {
+            (Vec::with_capacity(40 + 16 +4096), MessageCode::WriteProc)
+        }
+        SystemRegisterCommandContent::Ack => {
+            (Vec::with_capacity(40), MessageCode::ACK)
+        }
+    };
+    
+    buff.extend(&MAGIC_NUMBER);
+    buff.extend(&[0u8, 0u8]);
+    buff.push(cmd.header.process_identifier);
+    buff.push(msg_code as u8);
+    buff.extend(cmd.header.msg_ident.as_bytes());
+    buff.extend(&cmd.header.read_ident.to_be_bytes());
+    buff.extend(&cmd.header.sector_idx.to_be_bytes());
+    if let SystemRegisterCommandContent::Value { timestamp, write_rank, ref sector_data } = cmd.content {
+        buff.extend(&timestamp.to_be_bytes());
+        buff.extend(&[0u8; 7]);
+        buff.push(write_rank);
+        buff.extend(sector_data.0.as_slice());
+    } else if let SystemRegisterCommandContent::WriteProc { timestamp, write_rank, ref data_to_write } = cmd.content {
+        buff.extend(&timestamp.to_be_bytes());
+        buff.extend(&[0u8; 7]);
+        buff.push(write_rank);
+        buff.extend(data_to_write.0.as_slice());
+    };
+
+    writer.write_all(&buff).await?;
+
+    Ok(())
+}
+
+async fn serialize_client_command(
+    cmd: &ClientRegisterCommand,
+    writer: &mut (dyn AsyncWrite + Send + Unpin),
+    mac: &mut HmacSha256,
+) -> Result<(), std::io::Error> {
+    let (mut buff, msg_code) : (Vec<u8>, _) = match cmd.content {
+        ClientRegisterCommandContent::Read => (Vec::with_capacity(24), MessageCode::Read),
+        ClientRegisterCommandContent::Write { .. } => (Vec::with_capacity(24 + 4096), MessageCode::Read),
+    };
+
+    buff.extend(&MAGIC_NUMBER);
+    buff.extend(&[0u8; 3]);
+    buff.push(msg_code as u8);
+    buff.extend(cmd.header.request_identifier.to_be_bytes());
+    buff.extend(cmd.header.sector_idx.to_be_bytes());
+    if let ClientRegisterCommandContent::Write { ref data } = cmd.content {
+        buff.extend(data.0.iter());
+    }
+    mac.update(buff.as_slice());
+    writer.write_all(buff.as_slice()).await?;
+
+    Ok(())  
 }
 
 fn try_to_msg_type(value: u8) -> Option<MessageCode> {

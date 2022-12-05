@@ -188,9 +188,9 @@ impl TCPConnector {
         msg_type: u8,
         request_identifier: u64,
     ) {
-        let mut header_buff = Vec::<u8>::with_capacity(128);
+        let mut header_buff = Vec::<u8>::with_capacity(16);
         let (mut content_buff, content) = match op_return {
-            None => (vec![0u8, 0], None),
+            None => (vec![0u8; 0], None),
             Some(OperationReturn::Read(read_ret)) => {
                 (Vec::<u8>::with_capacity(4096), Some(read_ret))
             }

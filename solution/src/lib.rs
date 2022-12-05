@@ -108,7 +108,7 @@ pub mod sectors_manager_public {
 }
 
 pub mod transfer_public {
-    use crate::{RegisterCommand, implementation::utils::detect_and_deserialize_register_command};
+    use crate::{RegisterCommand, implementation::utils::{detect_and_deserialize_register_command, detect_and_serialize_register_command}};
     use std::io::Error;
     use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -125,7 +125,7 @@ pub mod transfer_public {
         writer: &mut (dyn AsyncWrite + Send + Unpin),
         hmac_key: &[u8],
     ) -> Result<(), Error> {
-        unimplemented!()
+        detect_and_serialize_register_command(cmd, writer, hmac_key).await
     }
 }
 
