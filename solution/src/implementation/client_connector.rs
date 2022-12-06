@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
+use log::debug;
 
 use async_channel::{bounded, unbounded, Receiver, Sender};
-use log::debug;
 use tokio::net::TcpStream;
 
 use crate::{
@@ -37,19 +37,15 @@ impl Connection {
                             if stubborn_send(&write_half, not_send.front().unwrap()).await {
                                 not_send.pop_front();
                             } else {
-                                debug!("Connection to {} failed", peer_address);
                                 break 'send_loop;
                             }
                         }
 
                         if let Ok(msg) = self.msg_queue.recv().await {
-                            debug!("NEw message to be send to {}", peer_address);
                             if !stubborn_send(&write_half, &msg).await {
-                                debug!("Connection to {} failed", peer_address);
                                 not_send.push_back(msg);
                                 break 'send_loop;
                             }
-                            debug!("Message send to {}", peer_address);
                         }
                     }
                 }
@@ -58,32 +54,17 @@ impl Connection {
                 }
             }
 
-            let recover_rx = self.recover_rx.recv();
-            let msg_queue = self.msg_queue.recv();
-            tokio::pin!(recover_rx);
-            tokio::pin!(msg_queue);
             'recover_wait_loop: loop {
                 tokio::select! {
-                    rx_signal = &mut recover_rx => match rx_signal {
-                        Ok(()) => {
-                            debug!("Connection to {} recovered", peer_address);
-                            break 'recover_wait_loop;
-                        },
-                        Err(e) => {
-                            debug!("Error in recover_rx.recv: {:?}", e);
-                            break 'recover_wait_loop;
-                        }
+                    rx_signal = self.recover_rx.recv() => {
+                        rx_signal.unwrap();
+                        debug!("Connection to {} recovered", peer_address);
+                        break 'recover_wait_loop;
                     },
-                    maybe_msg = &mut msg_queue => match maybe_msg {
-                        Ok(msg) => {
-                            not_send.push_back(msg);
-                            if not_send.len() > MAX_NOT_SEND_MSG_COUNT {
-                                not_send.pop_front();
-                            }
-                        },
-                        Err(e) => {
-                            debug!("Error in msg_queue.recv: {:?}", e);
-                            break 'recover_wait_loop;
+                    msg = self.msg_queue.recv() => {
+                        not_send.push_back(msg.unwrap());
+                        if not_send.len() > MAX_NOT_SEND_MSG_COUNT {
+                            not_send.pop_front();
                         }
                     }
                 };
@@ -162,8 +143,6 @@ impl ClientConnector {
 impl RegisterClient for ClientConnector {
     /// Sends a system message to a single process.
     async fn send(&self, msg: Send) {
-        debug!("Sending system message to process {}", msg.target);
-
         if msg.target == self.self_rank {
             self.request_system_msg_handle_tx
                 .send(Arc::try_unwrap(msg.cmd).unwrap())
@@ -185,13 +164,10 @@ impl RegisterClient for ClientConnector {
         if let Some(tx) = self.msg_txs.get(process) {
             tx.send(buff).await.unwrap();
         };
-
-        debug!("Successfully send system message to process {}", msg.target);
     }
 
     /// Broadcasts a system message to all processes in the system, including self.
     async fn broadcast(&self, msg: Broadcast) {
-        debug!("Broadcasting message to {} processes", self.msg_txs.len());
         let cmd = Arc::try_unwrap(msg.cmd).expect("Error unwraping msg Broadcast");
         self.request_system_msg_handle_tx
             .send(cmd.clone())
@@ -209,15 +185,5 @@ impl RegisterClient for ClientConnector {
         for tx in self.msg_txs.iter() {
             tx.send(buff.clone()).await.unwrap();
         }
-        debug!(
-            "Successfully broadcasted message to {} processes",
-            self.msg_txs.len()
-        );
-    }
-}
-
-impl Drop for ClientConnector {
-    fn drop(&mut self) {
-        debug!("Dropping ClientConnector");
     }
 }

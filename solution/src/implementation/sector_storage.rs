@@ -38,6 +38,7 @@ impl SectorStorage {
 impl SectorsManager for SectorStorage {
     /// Returns 4096 bytes of sector data by index.
     async fn read_data(&self, idx: SectorIdx) -> SectorVec {
+        #[allow(unused_assignments)]
         let mut maybe_file_path = None;
         {
             let lock = self.metadata.lock().unwrap();
@@ -79,6 +80,7 @@ impl SectorsManager for SectorStorage {
     /// Writes a new data, along with timestamp and write rank to some sector.
     async fn write(&self, idx: SectorIdx, sector: &(SectorVec, u64, u8)) {
         let (data, timestamp, wr) = sector;
+        #[allow(unused_assignments)]
         let mut maybe_file_path = None;
         {
             let lock = self.metadata.lock().unwrap();

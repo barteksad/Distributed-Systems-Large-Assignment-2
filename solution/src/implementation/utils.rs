@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use hmac::{Hmac, Mac};
-use log::{debug, error, info};
+use log::debug;
 use sha2::Sha256;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -80,21 +80,18 @@ pub async fn detect_and_deserialize_register_command(
 
         match try_to_msg_type(buff[3]) {
             Some(code) if code == MessageCode::Read || code == MessageCode::Write => {
-                debug!("Detected client message");
                 let mut mac = HmacSha256::new_from_slice(hmac_client_key).unwrap();
                 mac.update(&MAGIC_NUMBER);
                 mac.update(&buff);
                 match deserialize_client_command(data, mac, code).await {
                     Ok(command) => return Ok(command),
                     Err(DeserializeError::IoError(e)) => return Err(e),
-                    Err(DeserializeError::Other(what)) => {
-                        debug!("Error in deserialize_client_command from: {:?}", what);
+                    Err(DeserializeError::Other(..)) => {
                         continue;
                     }
                 }
             }
             Some(code) => {
-                debug!("Detected system message");
                 let mut mac = HmacSha256::new_from_slice(hmac_system_key).unwrap();
                 mac.update(&MAGIC_NUMBER);
                 mac.update(&buff);
@@ -102,8 +99,7 @@ pub async fn detect_and_deserialize_register_command(
                 match deserialize_system_command(data, mac, code, process_identifier).await {
                     Ok(command) => return Ok(command),
                     Err(DeserializeError::IoError(e)) => return Err(e),
-                    Err(DeserializeError::Other(what)) => {
-                        debug!("Error in deserialize_system_command from: {:?}", what);
+                    Err(DeserializeError::Other(..)) => {
                         continue;
                     }
                 }
@@ -183,7 +179,6 @@ async fn deserialize_system_command(
     let hmac_valid = check_hmac_valid(mac, data)
         .await
         .map_err(|e| DeserializeError::IoError(e))?;
-    error!("TU hmac ok: {:?}", hmac_valid);
     let msg_ident = Uuid::from_slice(&buff[0..16]).or(Err(DeserializeError::Other(
         "invalid msg_ident".to_string(),
     )))?;
@@ -222,7 +217,6 @@ async fn deserialize_system_command(
 
     let system_msg = SystemRegisterCommand { header, content };
 
-    debug!("Deserialize system command from: {:?}", system_msg.header.msg_ident);
     Ok((RegisterCommand::System(system_msg), hmac_valid))
 }
 

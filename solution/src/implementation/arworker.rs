@@ -1,7 +1,4 @@
 use async_channel::{Receiver, Sender};
-use log::debug;
-use log::error;
-use log::info;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
@@ -10,6 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::domain;
 use crate::AtomicRegister;
 use crate::Broadcast;
 use crate::ClientCommandHeader;
@@ -25,7 +23,6 @@ use crate::StableStorage;
 use crate::SystemCommandHeader;
 use crate::SystemRegisterCommand;
 use crate::SystemRegisterCommandContent;
-use crate::domain;
 
 pub struct AtomicRegisterInstance {
     self_ident: u8,
@@ -106,7 +103,7 @@ impl AtomicRegisterInstance {
                 process_identifier: self.self_ident,
                 msg_ident: self.self_id,
                 read_ident: rid,
-                sector_idx: sector_idx,
+                sector_idx,
             },
             content: SystemRegisterCommandContent::ReadProc,
         };
@@ -214,7 +211,9 @@ impl AtomicRegisterInstance {
             return;
         }
         // >= not > beacuse we set readlist[self] also by receiving VALUE from ourselves
-        if self.readlist.len() as u8 >= (self.processes_count / 2) + self.processes_count % 2 && (self.reading || self.writing) {
+        if self.readlist.len() as u8 >= (self.processes_count / 2) + self.processes_count % 2
+            && (self.reading || self.writing)
+        {
             let mut sorted: Vec<(u64, u8, SectorVec)> =
                 self.readlist.drain().map(|(_, v)| v).collect();
             sorted.sort_by(|(lsh_ts, lhs_wr, _), (rhs_ts, rhs_wr, _)| {
@@ -237,7 +236,10 @@ impl AtomicRegisterInstance {
                 true => SystemRegisterCommandContent::WriteProc {
                     timestamp: maxts,
                     write_rank: rr,
-                    data_to_write: self.readval.clone().unwrap(),
+                    data_to_write: self
+                        .readval
+                        .clone()
+                        .expect("Error in algorithm logic, writeval not set"),
                 },
                 false => {
                     // Do not store(ts, wr, val) here because it may cause race condition, instead store it when received broadcasted WRITE_PROC
@@ -271,28 +273,43 @@ impl AtomicRegisterInstance {
         self.acklist.insert(header.process_identifier);
 
         if !self.acklist.contains(&self.self_ident) {
-            return
+            return;
         }
 
-        if self.acklist.len() as u8 >= (self.processes_count / 2) + self.processes_count % 2 && (self.reading || self.writing) {
+        if self.acklist.len() as u8 >= (self.processes_count / 2) + self.processes_count % 2
+            && (self.reading || self.writing)
+        {
             self.acklist.clear();
             self.write_phase = false;
             let op_return = match self.reading {
                 true => {
                     self.reading = false;
-                    OperationReturn::Read(domain::ReadReturn { read_data: self.readval.take().unwrap() })
-                },
+                    OperationReturn::Read(domain::ReadReturn {
+                        read_data: self
+                            .readval
+                            .take()
+                            .expect("Error in algorithm logic, readval not set"),
+                    })
+                }
                 false => {
                     self.writing = false;
                     OperationReturn::Write
-                },
+                }
             };
 
             let op_success = OperationSuccess {
-                request_identifier: self.request_identifier.take().unwrap(),
+                request_identifier: self
+                    .request_identifier
+                    .take()
+                    .expect("Error in algorithm logic, request_identifier not set"),
                 op_return,
             };
-            self.success_callback.take().unwrap()(op_success).await;
+            self.success_callback
+                .take()
+                .expect("Error in algorithm logic, success_callback not set")(
+                op_success
+            )
+            .await;
         }
     }
 }
@@ -306,7 +323,6 @@ impl AtomicRegister for AtomicRegisterInstance {
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         >,
     ) {
-        error!("AtomicRegisterInstance: {} received client command", self.self_ident);
         self.success_callback = Some(success_callback);
         self.request_identifier = Some(cmd.header.request_identifier);
 
@@ -321,7 +337,6 @@ impl AtomicRegister for AtomicRegisterInstance {
     }
 
     async fn system_command(&mut self, cmd: SystemRegisterCommand) {
-        error!("AtomicRegisterInstance: {} received system command", self.self_ident);
         match cmd.content {
             SystemRegisterCommandContent::ReadProc => {
                 self.system_read_proc(cmd.header).await;
@@ -363,40 +378,37 @@ impl ARWorker {
         sectors_manager: Arc<dyn SectorsManager>,
         processes_count: u8,
     ) -> Self {
-        let ar = Box::new(AtomicRegisterInstance::new( 
-            self_ident, 
-            self_id,
-            metadata, 
-            register_client, 
-            sectors_manager, 
-            processes_count,
-        ).await);
+        let ar = Box::new(
+            AtomicRegisterInstance::new(
+                self_ident,
+                self_id,
+                metadata,
+                register_client,
+                sectors_manager,
+                processes_count,
+            )
+            .await,
+        );
 
-        ARWorker {
-            self_id,
-            ar,
-        }
+        ARWorker { self_id, ar }
     }
 
-    pub async fn run(mut self,
+    pub async fn run(
+        mut self,
         client_msg_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
         system_msg_rx: Receiver<SystemRegisterCommand>,
         client_msg_finished_tx: Sender<Uuid>,
-        system_msg_finished_tx: Sender<SectorIdx>
+        system_msg_finished_tx: Sender<SectorIdx>,
     ) {
-        let client_msg_rx = client_msg_rx.recv();
-        let system_msg_rx = system_msg_rx.recv();
-        tokio::pin!(client_msg_rx);
-        tokio::pin!(system_msg_rx);
         loop {
             tokio::select! {
-                Ok((client_msg, result_tx)) = &mut client_msg_rx => {
+                Ok((client_msg, result_tx)) = client_msg_rx.recv() => {
                     self.handle_client_command(client_msg, result_tx, client_msg_finished_tx.clone()).await;
                 }
-                Ok(system_msg) = &mut system_msg_rx => {
+                Ok(system_msg) = system_msg_rx.recv() => {
                     let sector_idx = system_msg.header.sector_idx;
                     self.ar.system_command(system_msg).await;
-                    system_msg_finished_tx.send(sector_idx).await.expect("Error");
+                    system_msg_finished_tx.send(sector_idx).await.unwrap();
                 }
             }
         }
@@ -408,26 +420,16 @@ impl ARWorker {
         result_tx: Sender<OperationReturn>,
         client_msg_finished_tx: Sender<Uuid>,
     ) {
-        debug!("BEFORE");
         let id = self.self_id.clone();
         let success_callback: Box<
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         > = Box::new(move |operation_success: OperationSuccess| {
             Box::pin(async move {
-                info!("IF CLOSED: {:?}, {:?}, {:?}", result_tx.is_closed(), result_tx.receiver_count(), result_tx.sender_count());
-                if let Err(e) = result_tx.send(operation_success.op_return).await {
-                    debug!("Error in ARWorker result_tx.send: {:?}", e);
-                }
-                client_msg_finished_tx.send(id).await.expect("Error");
+                result_tx.send(operation_success.op_return).await.unwrap();
+                client_msg_finished_tx.send(id).await.unwrap();
             })
         });
-        debug!("ARWorker: client_command: {:?}", client_msg.header.request_identifier);
-        self.ar.client_command(client_msg, success_callback).await
-    }
-}
 
-impl Drop for ARWorker {
-    fn drop(&mut self) {
-        debug!("Dropping ARWorker");
+        self.ar.client_command(client_msg, success_callback).await
     }
 }

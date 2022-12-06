@@ -14,7 +14,7 @@ pub use transfer_public::*;
 
 pub async fn run_register_process(config: Configuration) {
     let tcp_listener = get_listener(&config).await;
-    let mut run_manager = RunManager::new(config, tcp_listener).await;
+    let run_manager = RunManager::new(config, tcp_listener).await;
     run_manager.run().await;
 }
 
