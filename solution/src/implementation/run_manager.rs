@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_channel::{bounded, unbounded, Receiver, Sender};
-use log::debug;
+use log::{debug, error};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -15,7 +15,7 @@ use crate::{
 
 use super::{client_connector::ClientConnector, tcp_connector::TCPConnector};
 
-static ARWORKER_COUNT: u8 = 1;
+static ARWORKER_COUNT: u8 = 16;
 
 pub struct RunManager {
     ready_for_client: Vec<Uuid>,
@@ -34,7 +34,7 @@ impl RunManager {
     pub async fn new(config: Configuration, tcp_listener: TcpListener) -> Self {
         let (request_client_msg_handle_tx, request_client_msg_handle_rx) = bounded(1);
         let (request_system_msg_handle_tx, request_system_msg_handle_rx) = unbounded();
-        let (system_recovered_tx, system_recovered_rx) = bounded(1);
+        let (system_recovered_tx, system_recovered_rx) = bounded(ARWORKER_COUNT.into());
         let tcp_connector = Arc::new(TCPConnector::new(
             &config,
             request_client_msg_handle_tx,
@@ -73,7 +73,7 @@ impl RunManager {
             ready_for_system.push(uuid);
 
             let (client_msg_tx, client_msg_rx) =
-                bounded::<(ClientRegisterCommand, Sender<OperationReturn>)>(1);
+                bounded::<(ClientRegisterCommand, Sender<OperationReturn>)>(2);
             let (system_msg_tx, system_msg_rx) = unbounded::<SystemRegisterCommand>();
 
             uuid2client_msg_tx.insert(uuid, client_msg_tx);
@@ -86,13 +86,14 @@ impl RunManager {
                 register_client.clone(),
                 sectors_manager.clone(),
                 config.public.tcp_locations.len() as u8,
+            )
+            .await;
+            tokio::spawn(arworker.run(
                 client_msg_rx.clone(),
                 system_msg_rx.clone(),
                 client_msg_finished_tx.clone(),
                 system_msg_finished_tx.clone(),
-            )
-            .await;
-            tokio::spawn(arworker.run());
+            ));
         }
 
         tokio::spawn(register_client.run());
@@ -112,11 +113,37 @@ impl RunManager {
     }
 
     pub async fn run(mut self) {
-        loop {
+        let next_client_msg = self.request_client_msg_handle_rx.recv();
+        tokio::pin!(next_client_msg);
+        let client_msg_finished = self.client_msg_finished_rx.recv();
+        tokio::pin!(client_msg_finished);
+        let next_system_msg = self.request_system_msg_handle_rx.recv();
+        tokio::pin!(next_system_msg);
+        let system_msg_finished = self.system_msg_finished_rx.recv();
+        tokio::pin!(system_msg_finished);
 
+        loop {
             tokio::select! {
+                recvd = &mut system_msg_finished => {
+                    let sector_idx = recvd.unwrap();
+                    if let Some((rw_count, uuid)) = self.sector2rw.get_mut(&sector_idx) {
+                        debug!("ARWorker: {:?} finished system message handling on sector: {:?}",uuid, sector_idx);
+                        *rw_count -= 1;
+                        if *rw_count == 0 {
+                            self.ready_for_system.push(*uuid);
+                            self.sector2rw.remove(&sector_idx);
+                        }
+                    }
+                }
+                // Client message handling finished
+                recvd = &mut client_msg_finished => {
+                    let uuid = recvd.unwrap();
+                    debug!("ARWorker {:?} finished client message handling", uuid);
+                    self.ready_for_client.push(uuid);
+                }
                 // Send new client message to be handeled if there is ARWorker ready to do so
-                Ok((client_msg, result_tx)) = self.request_client_msg_handle_rx.recv(), if !self.ready_for_client.is_empty() => {
+                recvd = &mut next_client_msg, if !self.ready_for_client.is_empty() => {
+                    let (client_msg, result_tx) = recvd.unwrap();
                     assert!(!self.ready_for_client.is_empty());
                     let uuid = self.ready_for_client.pop().unwrap();
                     if let Some(tx) = self.uuid2client_msg_tx.get(&uuid) {
@@ -124,13 +151,10 @@ impl RunManager {
                     }
                     debug!("Assigned client message to ARWorker {:?}", uuid);
                 }
-                // Client message handling finished
-                Ok(uuid) = self.client_msg_finished_rx.recv() => {
-                    debug!("ARWorker {:?} finished client message handling", uuid);
-                    self.ready_for_client.push(uuid);
-                }
                 // Send new system message to be handeled if there is ARWorker ready to do so
-                Ok(system_msg) = self.request_system_msg_handle_rx.recv(), if !self.ready_for_system.is_empty() => {
+                recvd = &mut next_system_msg, if !self.ready_for_system.is_empty() => {
+                    let system_msg = recvd.unwrap();
+                    debug!("Received system message from worker: {:?}, type", system_msg.header.msg_ident);
                     assert!(!self.ready_for_system.is_empty());
                     let sector_idx = system_msg.header.sector_idx;
                     match system_msg.content {
@@ -138,30 +162,27 @@ impl RunManager {
                             let uuid = &system_msg.header.msg_ident;
                             if let Some(tx) = self.uuid2system_msg_tx.get(uuid) {
                                 tx.send(system_msg).await.unwrap();
-                            };
+                            } else {
+                                error!("ERROR");
+                            }
                         }
                         ReadProc | WriteProc { .. } => {
                             if let Some((rw_count, uuid)) = self.sector2rw.get_mut(&sector_idx) {
                                 *rw_count += 1;
                                 if let Some(tx) = self.uuid2system_msg_tx.get(uuid){
                                     tx.send(system_msg).await.unwrap();
-                                };
+                                } else {
+                                    error!("ERROR");
+                                }
                             } else {
                                 let uuid = self.ready_for_system.pop().unwrap();
                                 self.sector2rw.insert(sector_idx, (1, uuid));
                                 if let Some(tx) = self.uuid2system_msg_tx.get(&uuid){
                                     tx.send(system_msg).await.unwrap()
-                                };
+                                } else {
+                                    error!("ERROR");
+                                }
                             }
-                        }
-                    }
-                }
-                Ok(sector_idx) = self.system_msg_finished_rx.recv() => {
-                    if let Some((rw_count, uuid)) = self.sector2rw.get_mut(&sector_idx) {
-                        *rw_count -= 1;
-                        if *rw_count == 0 {
-                            self.ready_for_system.push(*uuid);
-                            self.sector2rw.remove(&sector_idx);
                         }
                     }
                 }

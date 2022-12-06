@@ -1,5 +1,7 @@
 use async_channel::{Receiver, Sender};
 use log::debug;
+use log::error;
+use log::info;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
@@ -148,7 +150,7 @@ impl AtomicRegisterInstance {
         let system_msg = SystemRegisterCommand {
             header: SystemCommandHeader {
                 process_identifier: self.self_ident,
-                msg_ident: self.self_id,
+                msg_ident: header.msg_ident,
                 read_ident: header.read_ident,
                 sector_idx: header.sector_idx,
             },
@@ -185,7 +187,7 @@ impl AtomicRegisterInstance {
         let system_msg = SystemRegisterCommand {
             header: SystemCommandHeader {
                 process_identifier: self.self_ident,
-                msg_ident: self.self_id,
+                msg_ident: header.msg_ident,
                 read_ident: header.read_ident,
                 sector_idx: header.sector_idx,
             },
@@ -227,7 +229,7 @@ impl AtomicRegisterInstance {
 
             let header = SystemCommandHeader {
                 process_identifier: self.self_ident,
-                msg_ident: self.self_id,
+                msg_ident: header.msg_ident,
                 read_ident: rid,
                 sector_idx: header.sector_idx,
             };
@@ -304,7 +306,7 @@ impl AtomicRegister for AtomicRegisterInstance {
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         >,
     ) {
-        debug!("ARWorker received client command");
+        error!("AtomicRegisterInstance: {} received client command", self.self_ident);
         self.success_callback = Some(success_callback);
         self.request_identifier = Some(cmd.header.request_identifier);
 
@@ -319,6 +321,7 @@ impl AtomicRegister for AtomicRegisterInstance {
     }
 
     async fn system_command(&mut self, cmd: SystemRegisterCommand) {
+        error!("AtomicRegisterInstance: {} received system command", self.self_ident);
         match cmd.content {
             SystemRegisterCommandContent::ReadProc => {
                 self.system_read_proc(cmd.header).await;
@@ -349,10 +352,6 @@ impl AtomicRegister for AtomicRegisterInstance {
 pub struct ARWorker {
     self_id: Uuid,
     ar: Box<dyn AtomicRegister>,
-    client_msg_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
-    system_msg_rx: Receiver<SystemRegisterCommand>,
-    client_msg_finished_tx: Sender<Uuid>,
-    system_msg_finished_tx: Sender<SectorIdx>,
 }
 
 impl ARWorker {
@@ -363,10 +362,6 @@ impl ARWorker {
         register_client: Arc<dyn RegisterClient>,
         sectors_manager: Arc<dyn SectorsManager>,
         processes_count: u8,
-        client_msg_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
-        system_msg_rx: Receiver<SystemRegisterCommand>,
-        client_msg_finished_tx: Sender<Uuid>,
-        system_msg_finished_tx: Sender<SectorIdx>,
     ) -> Self {
         let ar = Box::new(AtomicRegisterInstance::new( 
             self_ident, 
@@ -380,32 +375,28 @@ impl ARWorker {
         ARWorker {
             self_id,
             ar,
-            client_msg_rx,
-            system_msg_rx,
-            client_msg_finished_tx,
-            system_msg_finished_tx,
         }
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(mut self,
+        client_msg_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
+        system_msg_rx: Receiver<SystemRegisterCommand>,
+        client_msg_finished_tx: Sender<Uuid>,
+        system_msg_finished_tx: Sender<SectorIdx>
+    ) {
+        let client_msg_rx = client_msg_rx.recv();
+        let system_msg_rx = system_msg_rx.recv();
+        tokio::pin!(client_msg_rx);
+        tokio::pin!(system_msg_rx);
         loop {
             tokio::select! {
-                Ok((client_msg, result_tx)) = self.client_msg_rx.recv() => {
-                    self.handle_client_command(client_msg, result_tx).await;
-                    self.client_msg_finished_tx.send(self.self_id).await.expect("Error");
+                Ok((client_msg, result_tx)) = &mut client_msg_rx => {
+                    self.handle_client_command(client_msg, result_tx, client_msg_finished_tx.clone()).await;
                 }
-                Ok(system_msg) = self.system_msg_rx.recv() => {
+                Ok(system_msg) = &mut system_msg_rx => {
                     let sector_idx = system_msg.header.sector_idx;
                     self.ar.system_command(system_msg).await;
-                    self.system_msg_finished_tx.send(sector_idx).await.expect("Error");
-                }
-                Err(e) = self.system_msg_rx.recv() => {
-                    debug!("Error in ARWorker system_rx.recv: {:?}", e);
-                    panic!();
-                }
-                Err(e) = self.client_msg_rx.recv() => {
-                    debug!("Error in ARWorker client_msg_rx.recv: {:?}", e);
-                    panic!();
+                    system_msg_finished_tx.send(sector_idx).await.expect("Error");
                 }
             }
         }
@@ -415,16 +406,19 @@ impl ARWorker {
         &mut self,
         client_msg: ClientRegisterCommand,
         result_tx: Sender<OperationReturn>,
+        client_msg_finished_tx: Sender<Uuid>,
     ) {
         debug!("BEFORE");
+        let id = self.self_id.clone();
         let success_callback: Box<
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         > = Box::new(move |operation_success: OperationSuccess| {
             Box::pin(async move {
-                debug!("IF CLOSED: {:?}, {:?}, {:?}", result_tx.is_closed(), result_tx.receiver_count(), result_tx.sender_count());
+                info!("IF CLOSED: {:?}, {:?}, {:?}", result_tx.is_closed(), result_tx.receiver_count(), result_tx.sender_count());
                 if let Err(e) = result_tx.send(operation_success.op_return).await {
                     debug!("Error in ARWorker result_tx.send: {:?}", e);
                 }
+                client_msg_finished_tx.send(id).await.expect("Error");
             })
         });
         debug!("ARWorker: client_command: {:?}", client_msg.header.request_identifier);

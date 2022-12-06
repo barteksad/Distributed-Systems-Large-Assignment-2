@@ -85,16 +85,18 @@ impl TCPConnector {
         mut system_msg: SystemRegisterCommand,
         mut hmac_valid: bool,
     ) {
-        self.system_recovered_tx
-            .send(system_msg.header.process_identifier)
-            .await
-            .unwrap();
+        debug!("New system message from: {:?}", socket.peer_addr());
+        // self.system_recovered_tx
+        //     .send(system_msg.header.process_identifier)
+        //     .await
+        //     .unwrap();
 
         let peer_address = socket.peer_addr();
         let (read_half, _) = socket.into_split();
         let mut read_buff = tokio::io::BufReader::new(read_half);
 
         loop {
+            debug!("request_system_msg_handle_tx for message from: {:?}", peer_address);
             // TODO check sector index and process rank
             if hmac_valid {
                 self.request_system_msg_handle_tx
@@ -105,6 +107,7 @@ impl TCPConnector {
                 debug!("Invalid hmac in system message from: {:?}", peer_address);
             }
 
+            debug!("Waiting for new system message from: {:?}", peer_address);
             if let Ok((RegisterCommand::System(new_system_msg), new_hmac_valid)) =
                 deserialize_register_command(
                     &mut read_buff,
@@ -151,13 +154,15 @@ impl TCPConnector {
                     write_half.peer_addr()
                 );
                 let (result_tx, result_rx) = bounded(2);
+                let not_drop_before_send = result_tx.clone();
                 self.request_client_msg_handle_tx
                     .send((client_msg, result_tx))
                     .await
                     .expect("Error sending client message to request handler");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                debug!("CLOSED: {:?}, {:?}, {:?}", result_rx.is_closed(), result_rx.receiver_count(), result_rx.sender_count());
                 op_return = Some(result_rx.recv().await.unwrap());
+                not_drop_before_send.close();
+                debug!("CLOSED: {:?}, {:?}, {:?}", result_rx.is_closed(), result_rx.receiver_count(), result_rx.sender_count());
             } else {
                 debug!(
                     "Invalid client message from client at: {:?}, status_code: {:?}",
@@ -186,7 +191,7 @@ impl TCPConnector {
             {
                 client_msg = new_client_msg;
                 hmac_valid = new_hmac_valid;
-                debug!("New client message from: {:?}", write_half.peer_addr());
+                debug!("Next new client message from: {:?}", write_half.peer_addr());
             } else {
                 return;
             }
@@ -224,6 +229,7 @@ async fn send_client_response(
     let hmac_tag = add_hmac_tag(&header_buff, &content_buff, hmac_client_key);
     let data = [header_buff, content_buff, hmac_tag].concat();
     stubborn_send(socket, &data[..]).await;
+    debug!("Sent client response: {:?}", status_code);
 }
 
 impl Drop for TCPConnector {

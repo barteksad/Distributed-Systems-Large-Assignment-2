@@ -37,15 +37,19 @@ impl Connection {
                             if stubborn_send(&write_half, not_send.front().unwrap()).await {
                                 not_send.pop_front();
                             } else {
+                                debug!("Connection to {} failed", peer_address);
                                 break 'send_loop;
                             }
                         }
 
                         if let Ok(msg) = self.msg_queue.recv().await {
+                            debug!("NEw message to be send to {}", peer_address);
                             if !stubborn_send(&write_half, &msg).await {
+                                debug!("Connection to {} failed", peer_address);
                                 not_send.push_back(msg);
                                 break 'send_loop;
                             }
+                            debug!("Message send to {}", peer_address);
                         }
                     }
                 }
@@ -54,9 +58,13 @@ impl Connection {
                 }
             }
 
+            let recover_rx = self.recover_rx.recv();
+            let msg_queue = self.msg_queue.recv();
+            tokio::pin!(recover_rx);
+            tokio::pin!(msg_queue);
             'recover_wait_loop: loop {
                 tokio::select! {
-                    rx_signal = self.recover_rx.recv() => match rx_signal {
+                    rx_signal = &mut recover_rx => match rx_signal {
                         Ok(()) => {
                             debug!("Connection to {} recovered", peer_address);
                             break 'recover_wait_loop;
@@ -66,7 +74,7 @@ impl Connection {
                             break 'recover_wait_loop;
                         }
                     },
-                    maybe_msg = self.msg_queue.recv() => match maybe_msg {
+                    maybe_msg = &mut msg_queue => match maybe_msg {
                         Ok(msg) => {
                             not_send.push_back(msg);
                             if not_send.len() > MAX_NOT_SEND_MSG_COUNT {
@@ -103,7 +111,7 @@ impl ClientConnector {
         let mut msg_txs = Vec::with_capacity(n_connections);
         let mut recover_txs = Vec::with_capacity(n_connections);
 
-        for process in 0..n_connections {
+        for process in 0..(n_connections + 1) {
             if process == (config.public.self_rank - 1) as usize {
                 continue;
             }

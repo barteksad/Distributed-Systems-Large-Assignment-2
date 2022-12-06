@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use hmac::{Hmac, Mac};
-use log::debug;
+use log::{debug, error, info};
 use sha2::Sha256;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -70,7 +70,6 @@ pub async fn detect_and_deserialize_register_command(
         let mut buff = vec![0u8; MAGIC_NUMBER.len()];
 
         while &buff[0..4] != MAGIC_NUMBER.as_ref() {
-            debug!("Invalid magic number {:?}, waiting for new one", buff);
             data.read_exact(&mut buff).await?;
             if buff == MAGIC_NUMBER {
                 break;
@@ -133,7 +132,7 @@ async fn deserialize_client_command(
         .map_err(|e| DeserializeError::IoError(e))?;
     mac.update(&buff);
     // Check before deserialize to read exact amonut of bytes
-    let hmac_valid = check_hmac_valid(mac, data, 32)
+    let hmac_valid = check_hmac_valid(mac, data)
         .await
         .map_err(|e| DeserializeError::IoError(e))?;
 
@@ -171,20 +170,20 @@ async fn deserialize_system_command(
             vec![0u8; 32]
         }
         MessageCode::VALUE | MessageCode::WriteProc => {
-            vec![0u8; 32 + 4096]
+            vec![0u8; 32 + 16 + 4096]
         }
         _ => unreachable!(),
     };
-
+    
     data.read_exact(&mut buff)
         .await
         .map_err(|e| DeserializeError::IoError(e))?;
     mac.update(&buff);
     // Check before deserialize to read exact amonut of bytes
-    let hmac_valid = check_hmac_valid(mac, data, 64)
+    let hmac_valid = check_hmac_valid(mac, data)
         .await
         .map_err(|e| DeserializeError::IoError(e))?;
-
+    error!("TU hmac ok: {:?}", hmac_valid);
     let msg_ident = Uuid::from_slice(&buff[0..16]).or(Err(DeserializeError::Other(
         "invalid msg_ident".to_string(),
     )))?;
@@ -223,6 +222,7 @@ async fn deserialize_system_command(
 
     let system_msg = SystemRegisterCommand { header, content };
 
+    debug!("Deserialize system command from: {:?}", system_msg.header.msg_ident);
     Ok((RegisterCommand::System(system_msg), hmac_valid))
 }
 
@@ -241,7 +241,8 @@ pub async fn detect_and_serialize_register_command(
         },
     }
 
-    writer.write_all(mac.finalize().into_bytes().as_slice()).await?;
+    let tag = mac.finalize().into_bytes().to_vec();
+    writer.write_all(&tag).await?;
 
     Ok(())
 }
@@ -259,7 +260,7 @@ async fn serialize_system_command(
             (Vec::with_capacity(40 + 16 + 4096), MessageCode::VALUE)
         }
         SystemRegisterCommandContent::WriteProc { .. } => {
-            (Vec::with_capacity(40 + 16 +4096), MessageCode::WriteProc)
+            (Vec::with_capacity(40 + 16 + 4096), MessageCode::WriteProc)
         }
         SystemRegisterCommandContent::Ack => {
             (Vec::with_capacity(40), MessageCode::ACK)
@@ -286,7 +287,6 @@ async fn serialize_system_command(
     };
 
     mac.update(&buff);
-
     writer.write_all(&buff).await?;
 
     Ok(())
@@ -311,6 +311,7 @@ async fn serialize_client_command(
         buff.extend(data.0.iter());
     }
     mac.update(buff.as_slice());
+    
     writer.write_all(buff.as_slice()).await?;
 
     Ok(())  
@@ -331,9 +332,8 @@ fn try_to_msg_type(value: u8) -> Option<MessageCode> {
 async fn check_hmac_valid(
     mac: HmacSha256,
     data: &mut (dyn AsyncRead + Send + Unpin),
-    key_size: usize,
 ) -> Result<bool, std::io::Error> {
-    let mut buff = vec![0u8; key_size];
+    let mut buff = vec![0u8; 32];
     data.read_exact(&mut buff).await?;
     Ok(mac.verify_slice(&buff).is_ok())
 }
