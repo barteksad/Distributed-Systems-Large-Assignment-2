@@ -85,10 +85,12 @@ impl TCPConnector {
         mut system_msg: SystemRegisterCommand,
         mut hmac_valid: bool,
     ) {
-        // self.system_recovered_tx
-        //     .send(system_msg.header.process_identifier)
-        //     .await
-        //     .unwrap();
+        if !self.system_recovered_tx.is_full() {
+            self.system_recovered_tx
+            .send(system_msg.header.process_identifier)
+            .await
+            .unwrap();
+        }
 
         let peer_address = socket.peer_addr();
         let (read_half, _) = socket.into_split();

@@ -401,7 +401,7 @@ impl ARWorker {
         system_msg_finished_tx: Sender<SectorIdx>,
     ) {
         loop {
-            tokio::select! {
+                tokio::select! {
                 Ok((client_msg, result_tx)) = client_msg_rx.recv() => {
                     self.handle_client_command(client_msg, result_tx, client_msg_finished_tx.clone()).await;
                 }

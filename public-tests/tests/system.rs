@@ -15,7 +15,6 @@ use tokio::net::TcpStream;
 #[tokio::test]
 #[timeout(4000)]
 async fn single_process_system_completes_operations() {
-    env_logger::init();
     // given
     let hmac_client_key = [5; 32];
     let tcp_port = 30_287;
