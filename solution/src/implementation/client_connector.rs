@@ -55,13 +55,18 @@ impl Connection {
             }
 
             'recover_wait_loop: loop {
+                let recover_rx = self.recover_rx.recv();
+                let msg_queue = self.msg_queue.recv();
+                tokio::pin!(recover_rx);
+                tokio::pin!(msg_queue);
+                
                 tokio::select! {
-                    rx_signal = self.recover_rx.recv() => {
+                    rx_signal = &mut recover_rx => {
                         rx_signal.unwrap();
                         debug!("Connection to {} recovered", peer_address);
                         break 'recover_wait_loop;
                     },
-                    msg = self.msg_queue.recv() => {
+                    msg = &mut msg_queue => {
                         not_send.push_back(msg.unwrap());
                         if not_send.len() > MAX_NOT_SEND_MSG_COUNT {
                             not_send.pop_front();

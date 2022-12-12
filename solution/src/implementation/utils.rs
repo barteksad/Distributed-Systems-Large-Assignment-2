@@ -6,7 +6,7 @@ use sha2::Sha256;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::tcp::OwnedWriteHalf,
-    time::{sleep, Instant},
+    time::Instant,
 };
 use uuid::Uuid;
 
@@ -30,8 +30,7 @@ pub fn add_hmac_tag(header_buff: &Vec<u8>, content_buff: &Vec<u8>, hmac_key: &[u
 
 pub async fn stubborn_send(socket: &OwnedWriteHalf, data: &[u8]) -> bool {
     let mut wrote = 0;
-    let sleep = sleep(NEXT_SEND_DELAY);
-    tokio::pin!(sleep);
+    let mut interval = tokio::time::interval_at(Instant::now() + NEXT_SEND_DELAY, NEXT_SEND_DELAY);
 
     for _ in 0..N_SEND_TRIES {
         tokio::select! {
@@ -52,9 +51,7 @@ pub async fn stubborn_send(socket: &OwnedWriteHalf, data: &[u8]) -> bool {
                     }
                 }
             },
-            _ = &mut sleep => {
-                sleep.as_mut().reset(Instant::now() + NEXT_SEND_DELAY);
-            },
+            _ = interval.tick() => {},
         }
     }
 

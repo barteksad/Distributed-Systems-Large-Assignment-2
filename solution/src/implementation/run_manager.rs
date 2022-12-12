@@ -112,9 +112,17 @@ impl RunManager {
     }
 
     pub async fn run(mut self) {
+        let request_client_msg_handle_rx = self.request_client_msg_handle_rx.recv(); 
+        let request_system_msg_handle_rx = self.request_system_msg_handle_rx.recv(); 
+        let client_msg_finished_rx = self.client_msg_finished_rx.recv(); 
+        let system_msg_finished_rx = self.system_msg_finished_rx.recv(); 
+        tokio::pin!(request_client_msg_handle_rx);
+        tokio::pin!(request_system_msg_handle_rx);
+        tokio::pin!(client_msg_finished_rx);
+        tokio::pin!(system_msg_finished_rx);
         loop {
             tokio::select! {
-                recvd = self.system_msg_finished_rx.recv() => {
+                recvd = &mut system_msg_finished_rx => {
                     let sector_idx = recvd.unwrap();
                     if let Some((rw_count, uuid)) = self.sector2rw.get_mut(&sector_idx) {
                         *rw_count -= 1;
@@ -125,12 +133,12 @@ impl RunManager {
                     }
                 }
                 // Client message handling finished
-                recvd = self.client_msg_finished_rx.recv() => {
+                recvd = &mut client_msg_finished_rx => {
                     let uuid = recvd.unwrap();
                     self.ready_for_client.push(uuid);
                 }
                 // Send new client message to be handeled if there is ARWorker ready to do so
-                recvd = self.request_client_msg_handle_rx.recv(), if !self.ready_for_client.is_empty() => {
+                recvd = &mut request_client_msg_handle_rx, if !self.ready_for_client.is_empty() => {
                     let (client_msg, result_tx) = recvd.unwrap();
                     assert!(!self.ready_for_client.is_empty());
                     let uuid = self.ready_for_client.pop().unwrap();
@@ -139,7 +147,7 @@ impl RunManager {
                     }
                 }
                 // Send new system message to be handeled if there is ARWorker ready to do so
-                recvd = self.request_system_msg_handle_rx.recv(), if !self.ready_for_system.is_empty() => {
+                recvd = &mut request_system_msg_handle_rx, if !self.ready_for_system.is_empty() => {
                     let system_msg = recvd.unwrap();
                     assert!(!self.ready_for_system.is_empty());
                     let sector_idx = system_msg.header.sector_idx;

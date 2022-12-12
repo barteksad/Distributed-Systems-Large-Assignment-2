@@ -400,12 +400,16 @@ impl ARWorker {
         client_msg_finished_tx: Sender<Uuid>,
         system_msg_finished_tx: Sender<SectorIdx>,
     ) {
+        let client_msg_rx = client_msg_rx.recv();
+        let system_msg_rx = system_msg_rx.recv();
+        tokio::pin!(client_msg_rx);
+        tokio::pin!(system_msg_rx);
         loop {
                 tokio::select! {
-                Ok((client_msg, result_tx)) = client_msg_rx.recv() => {
+                Ok((client_msg, result_tx)) = &mut client_msg_rx => {
                     self.handle_client_command(client_msg, result_tx, client_msg_finished_tx.clone()).await;
                 }
-                Ok(system_msg) = system_msg_rx.recv() => {
+                Ok(system_msg) = &mut system_msg_rx => {
                     let sector_idx = system_msg.header.sector_idx;
                     self.ar.system_command(system_msg).await;
                     system_msg_finished_tx.send(sector_idx).await.unwrap();
