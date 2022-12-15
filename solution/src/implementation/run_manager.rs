@@ -7,8 +7,7 @@ use uuid::Uuid;
 use crate::{
     build_sectors_manager,
     implementation::{arworker::ARWorker, storage_data::build_stable_storage},
-    ClientRegisterCommand, Configuration, OperationReturn, SectorIdx,
-    SystemRegisterCommand,
+    ClientRegisterCommand, Configuration, OperationReturn, SectorIdx, SystemRegisterCommand,
     SystemRegisterCommandContent::{Ack, ReadProc, Value, WriteProc},
 };
 
@@ -42,7 +41,7 @@ impl RunManager {
         ));
 
         let mut manager_path = config.public.storage_dir.clone();
-        manager_path.push(format!("sectors-manager"));
+        manager_path.push("sectors-manager");
         tokio::fs::create_dir_all(&manager_path).await.unwrap();
         let sectors_manager = build_sectors_manager(manager_path).await;
         let register_client = Arc::new(ClientConnector::new(
@@ -112,10 +111,10 @@ impl RunManager {
     }
 
     pub async fn run(mut self) {
-        let request_client_msg_handle_rx = self.request_client_msg_handle_rx.recv(); 
-        let request_system_msg_handle_rx = self.request_system_msg_handle_rx.recv(); 
-        let client_msg_finished_rx = self.client_msg_finished_rx.recv(); 
-        let system_msg_finished_rx = self.system_msg_finished_rx.recv(); 
+        let request_client_msg_handle_rx = self.request_client_msg_handle_rx.recv();
+        let request_system_msg_handle_rx = self.request_system_msg_handle_rx.recv();
+        let client_msg_finished_rx = self.client_msg_finished_rx.recv();
+        let system_msg_finished_rx = self.system_msg_finished_rx.recv();
         tokio::pin!(request_client_msg_handle_rx);
         tokio::pin!(request_system_msg_handle_rx);
         tokio::pin!(client_msg_finished_rx);
@@ -164,12 +163,10 @@ impl RunManager {
                                 if let Some(tx) = self.uuid2system_msg_tx.get(uuid){
                                     tx.send(system_msg).await.unwrap();
                                 }
-                            } else {
-                                if let Some(uuid) = self.ready_for_system.pop() {
-                                    self.sector2rw.insert(sector_idx, (1, uuid));
-                                    if let Some(tx) = self.uuid2system_msg_tx.get(&uuid){
-                                        tx.send(system_msg).await.unwrap()
-                                    }
+                            } else if let Some(uuid) = self.ready_for_system.pop() {
+                                self.sector2rw.insert(sector_idx, (1, uuid));
+                                if let Some(tx) = self.uuid2system_msg_tx.get(&uuid){
+                                    tx.send(system_msg).await.unwrap()
                                 }
                             }
                         }

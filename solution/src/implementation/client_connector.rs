@@ -1,6 +1,6 @@
+use log::debug;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use log::debug;
 
 use async_channel::{bounded, unbounded, Receiver, Sender};
 use tokio::net::TcpStream;
@@ -59,7 +59,7 @@ impl Connection {
                 let msg_queue = self.msg_queue.recv();
                 tokio::pin!(recover_rx);
                 tokio::pin!(msg_queue);
-                
+
                 tokio::select! {
                     rx_signal = &mut recover_rx => {
                         rx_signal.unwrap();
@@ -128,9 +128,9 @@ impl ClientConnector {
 
     fn process2index(&self, process: u8) -> usize {
         if process < self.self_rank {
-            return process as usize;
+            process as usize
         } else {
-            return (process - 1) as usize;
+            (process - 1) as usize
         }
     }
 

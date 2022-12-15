@@ -76,16 +76,16 @@ impl AtomicRegisterInstance {
     async fn get_rid(&mut self) -> u64 {
         let rid_maybe: Vec<u8> = self
             .metadata
-            .get(&"rid".to_string())
+            .get("rid")
             .await
-            .unwrap_or(bincode::serialize(&(0 as u64)).unwrap());
+            .unwrap_or_else(|| bincode::serialize(&0_u64).unwrap());
         bincode::deserialize::<u64>(&rid_maybe).expect("Error reading rid from StableStorage")
     }
 
     async fn store_rid(&mut self, rid: u64) {
         let data = bincode::serialize(&rid).unwrap();
         self.metadata
-            .put(&"rid".to_string(), &data)
+            .put("rid", &data)
             .await
             .expect("Error storing rid in StableStorage");
     }
@@ -129,7 +129,7 @@ impl AtomicRegisterInstance {
                 process_identifier: self.self_ident,
                 msg_ident: self.self_id,
                 read_ident: rid,
-                sector_idx: sector_idx,
+                sector_idx,
             },
             content: SystemRegisterCommandContent::ReadProc,
         };
@@ -201,7 +201,7 @@ impl AtomicRegisterInstance {
 
     async fn system_value(&mut self, header: SystemCommandHeader, ts: u64, wr: u8, v: SectorVec) {
         let rid = self.get_rid().await;
-        if !(rid == header.read_ident && !self.write_phase) {
+        if rid != header.read_ident || self.write_phase {
             return;
         }
 
@@ -405,7 +405,7 @@ impl ARWorker {
         tokio::pin!(client_msg_rx);
         tokio::pin!(system_msg_rx);
         loop {
-                tokio::select! {
+            tokio::select! {
                 Ok((client_msg, result_tx)) = &mut client_msg_rx => {
                     self.handle_client_command(client_msg, result_tx, client_msg_finished_tx.clone()).await;
                 }
@@ -424,7 +424,7 @@ impl ARWorker {
         result_tx: Sender<OperationReturn>,
         client_msg_finished_tx: Sender<Uuid>,
     ) {
-        let id = self.self_id.clone();
+        let id = self.self_id;
         let success_callback: Box<
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         > = Box::new(move |operation_success: OperationSuccess| {

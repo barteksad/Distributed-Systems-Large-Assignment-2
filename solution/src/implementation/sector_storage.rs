@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
+use log::debug;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{SectorIdx, SectorVec, SectorsManager};
@@ -38,17 +39,14 @@ impl SectorStorage {
 impl SectorsManager for SectorStorage {
     /// Returns 4096 bytes of sector data by index.
     async fn read_data(&self, idx: SectorIdx) -> SectorVec {
+        debug!("Reading sector {} from disk", idx);
         #[allow(unused_assignments)]
         let mut maybe_file_path = None;
         {
             let lock = self.metadata.lock().unwrap();
             let sector_data = lock.get(&idx);
-            maybe_file_path = match sector_data {
-                Some((timestamp, wr)) => {
-                    Some(self.path.join(format!("{}.{}.{}", idx, *timestamp, *wr)))
-                }
-                None => None,
-            };
+            maybe_file_path = sector_data
+                .map(|(timestamp, wr)| self.path.join(format!("{}.{}.{}", idx, *timestamp, *wr)));
         }
 
         match maybe_file_path {
@@ -79,18 +77,15 @@ impl SectorsManager for SectorStorage {
 
     /// Writes a new data, along with timestamp and write rank to some sector.
     async fn write(&self, idx: SectorIdx, sector: &(SectorVec, u64, u8)) {
+        debug!("Writing sector {} to disk", idx);
         let (data, timestamp, wr) = sector;
         #[allow(unused_assignments)]
         let mut maybe_file_path = None;
         {
             let lock = self.metadata.lock().unwrap();
             let sector_data = lock.get(&idx);
-            maybe_file_path = match sector_data {
-                Some((timestamp, wr)) => {
-                    Some(self.path.join(format!("{}.{}.{}", idx, *timestamp, *wr)))
-                }
-                None => None,
-            };
+            maybe_file_path = sector_data
+                .map(|(prev_timestamp, prev_wr)| self.path.join(format!("{}.{}.{}", idx, *prev_timestamp, *prev_wr)));
         }
 
         if let Some(file_path) = maybe_file_path {

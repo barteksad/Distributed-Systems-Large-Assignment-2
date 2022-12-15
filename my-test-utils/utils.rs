@@ -51,13 +51,11 @@ pub struct TestProcessesConfig {
 }
 
 impl TestProcessesConfig {
-    pub const N_SECTORS: u64 = 65536;
+    pub const N_SECTORS: u64 = u64::MAX;
 
     pub fn new(processes_count: usize, port_range_start: u16) -> Self {
         TestProcessesConfig {
-            hmac_client_key: (0..32)
-                .map(|_| rand::thread_rng().gen_range(0..255))
-                .collect(),
+            hmac_client_key: vec![0u8; 32],
             hmac_system_key: (0..64)
                 .map(|_| rand::thread_rng().gen_range(0..255))
                 .collect(),
@@ -228,8 +226,5 @@ fn try_to_status_code(byte: u8) -> Option<StatusCode> {
     }
 }
 
-async fn wait_for_tcp_listen() {
-    tokio::time::sleep(Duration::from_millis(300)).await;
-}
 
 pub type HmacSha256 = Hmac<Sha256>;

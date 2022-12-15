@@ -87,9 +87,9 @@ impl TCPConnector {
     ) {
         if !self.system_recovered_tx.is_full() {
             self.system_recovered_tx
-            .send(system_msg.header.process_identifier)
-            .await
-            .unwrap();
+                .send(system_msg.header.process_identifier)
+                .await
+                .unwrap();
         }
 
         let peer_address = socket.peer_addr();
@@ -97,8 +97,7 @@ impl TCPConnector {
         let mut read_buff = tokio::io::BufReader::new(read_half);
 
         loop {
-            // TODO check sector index and process rank
-            if hmac_valid {
+            if hmac_valid && system_msg.header.sector_idx < self.n_sectors {
                 self.request_system_msg_handle_tx
                     .send(system_msg)
                     .await
@@ -106,6 +105,8 @@ impl TCPConnector {
             } else {
                 debug!("Invalid hmac in system message from: {:?}", peer_address);
             }
+
+            debug!("New system message from {:?}", peer_address);
 
             if let Ok((RegisterCommand::System(new_system_msg), new_hmac_valid)) =
                 deserialize_register_command(
@@ -139,11 +140,13 @@ impl TCPConnector {
                 ClientRegisterCommandContent::Read => 0x41,
                 ClientRegisterCommandContent::Write { .. } => 0x42,
             };
-            let status_code = match (hmac_valid, client_msg.header.sector_idx <= self.n_sectors) {
+            let status_code = match (hmac_valid, client_msg.header.sector_idx < self.n_sectors) {
                 (false, _) => StatusCode::AuthFailure,
                 (_, false) => StatusCode::InvalidSectorIndex,
                 _ => StatusCode::Ok,
             };
+
+            debug!("New client message from {:?}", write_half.peer_addr());
 
             if status_code == StatusCode::Ok {
                 let (result_tx, result_rx) = bounded(2);
@@ -188,7 +191,6 @@ impl TCPConnector {
             }
         }
     }
-
 }
 
 async fn send_client_response(
@@ -197,14 +199,12 @@ async fn send_client_response(
     op_return: Option<OperationReturn>,
     msg_type: u8,
     request_identifier: u64,
-    hmac_client_key: &[u8; 32]
+    hmac_client_key: &[u8; 32],
 ) {
     let mut header_buff = Vec::<u8>::with_capacity(16);
     let (mut content_buff, content) = match op_return {
         None => (vec![0u8; 0], None),
-        Some(OperationReturn::Read(read_ret)) => {
-            (Vec::<u8>::with_capacity(4096), Some(read_ret))
-        }
+        Some(OperationReturn::Read(read_ret)) => (Vec::<u8>::with_capacity(4096), Some(read_ret)),
         Some(OperationReturn::Write) => (Vec::<u8>::with_capacity(0), None),
     };
 

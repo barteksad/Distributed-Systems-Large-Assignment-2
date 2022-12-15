@@ -21,7 +21,7 @@ type HmacSha256 = Hmac<Sha256>;
 static N_SEND_TRIES: usize = 5;
 static NEXT_SEND_DELAY: Duration = Duration::from_millis(5000);
 
-pub fn add_hmac_tag(header_buff: &Vec<u8>, content_buff: &Vec<u8>, hmac_key: &[u8; 32]) -> Vec<u8> {
+pub fn add_hmac_tag(header_buff: &[u8], content_buff: &[u8], hmac_key: &[u8; 32]) -> Vec<u8> {
     let mut mac = HmacSha256::new_from_slice(hmac_key).unwrap();
     mac.update(header_buff);
     mac.update(content_buff);
@@ -55,7 +55,7 @@ pub async fn stubborn_send(socket: &OwnedWriteHalf, data: &[u8]) -> bool {
         }
     }
 
-    return false;
+    false
 }
 
 pub async fn detect_and_deserialize_register_command(
@@ -104,7 +104,7 @@ pub async fn detect_and_deserialize_register_command(
             None => {
                 debug!("Invalid message code");
                 continue;
-            },
+            }
         }
     }
 }
@@ -122,19 +122,23 @@ async fn deserialize_client_command(
 
     data.read_exact(&mut buff)
         .await
-        .map_err(|e| DeserializeError::IoError(e))?;
+        .map_err(DeserializeError::IoError)?;
     mac.update(&buff);
     // Check before deserialize to read exact amonut of bytes
     let hmac_valid = check_hmac_valid(mac, data)
         .await
-        .map_err(|e| DeserializeError::IoError(e))?;
+        .map_err(DeserializeError::IoError)?;
 
-    let request_identifier = u64::from_be_bytes(buff[0..8].try_into().or(Err(
-        DeserializeError::Other("invalid request_identifier".to_string()),
-    ))?);
-    let sector_idx = u64::from_be_bytes(buff[8..16].try_into().or(Err(
-        DeserializeError::Other("invalid sector_idx".to_string()),
-    ))?);
+    let request_identifier = u64::from_be_bytes(
+        buff[0..8]
+            .try_into()
+            .map_err(|_| DeserializeError::Other("invalid request_identifier".to_string()))?,
+    );
+    let sector_idx = u64::from_be_bytes(
+        buff[8..16]
+            .try_into()
+            .map_err(|_| DeserializeError::Other("invalid sector_idx".to_string()))?,
+    );
 
     let header = ClientCommandHeader {
         request_identifier,
@@ -159,32 +163,35 @@ async fn deserialize_system_command(
     process_identifier: u8,
 ) -> Result<(RegisterCommand, bool), DeserializeError> {
     let mut buff = match code {
-        MessageCode::ReadProc | MessageCode::ACK => {
+        MessageCode::ReadProc | MessageCode::Ack => {
             vec![0u8; 32]
         }
-        MessageCode::VALUE | MessageCode::WriteProc => {
+        MessageCode::Value | MessageCode::WriteProc => {
             vec![0u8; 32 + 16 + 4096]
         }
         _ => unreachable!(),
     };
-    
+
     data.read_exact(&mut buff)
         .await
-        .map_err(|e| DeserializeError::IoError(e))?;
+        .map_err(DeserializeError::IoError)?;
     mac.update(&buff);
     // Check before deserialize to read exact amonut of bytes
     let hmac_valid = check_hmac_valid(mac, data)
         .await
-        .map_err(|e| DeserializeError::IoError(e))?;
-    let msg_ident = Uuid::from_slice(&buff[0..16]).or(Err(DeserializeError::Other(
-        "invalid msg_ident".to_string(),
-    )))?;
-    let read_ident = u64::from_be_bytes(buff[16..24].try_into().or(Err(
-        DeserializeError::Other("invalid read_ident".to_string()),
-    ))?);
-    let sector_idx = u64::from_be_bytes(buff[24..32].try_into().or(Err(
-        DeserializeError::Other("invalid sector_idx".to_string()),
-    ))?);
+        .map_err(DeserializeError::IoError)?;
+    let msg_ident = Uuid::from_slice(&buff[0..16])
+        .map_err(|_| DeserializeError::Other("invalid msg_ident".to_string()))?;
+    let read_ident = u64::from_be_bytes(
+        buff[16..24]
+            .try_into()
+            .map_err(|_| DeserializeError::Other("invalid read_ident".to_string()))?,
+    );
+    let sector_idx = u64::from_be_bytes(
+        buff[24..32]
+            .try_into()
+            .map_err(|_| DeserializeError::Other("invalid sector_idx".to_string()))?,
+    );
 
     let header = SystemCommandHeader {
         process_identifier,
@@ -194,21 +201,25 @@ async fn deserialize_system_command(
     };
     let content = match code {
         MessageCode::ReadProc => SystemRegisterCommandContent::ReadProc,
-        MessageCode::VALUE => SystemRegisterCommandContent::Value {
-            timestamp: u64::from_be_bytes(buff[32..40].try_into().or(Err(
-                DeserializeError::Other("invalid timestamp".to_string()),
-            ))?),
+        MessageCode::Value => SystemRegisterCommandContent::Value {
+            timestamp: u64::from_be_bytes(
+                buff[32..40]
+                    .try_into()
+                    .map_err(|_| DeserializeError::Other("invalid timestamp".to_string()))?,
+            ),
             write_rank: buff[47],
             sector_data: SectorVec(buff[48..].to_vec()),
         },
         MessageCode::WriteProc => SystemRegisterCommandContent::WriteProc {
-            timestamp: u64::from_be_bytes(buff[32..40].try_into().or(Err(
-                DeserializeError::Other("invalid timestamp".to_string()),
-            ))?),
+            timestamp: u64::from_be_bytes(
+                buff[32..40]
+                    .try_into()
+                    .map_err(|_| DeserializeError::Other("invalid timestamp".to_string()))?,
+            ),
             write_rank: buff[47],
             data_to_write: SectorVec(buff[48..].to_vec()),
         },
-        MessageCode::ACK => SystemRegisterCommandContent::Ack,
+        MessageCode::Ack => SystemRegisterCommandContent::Ack,
         _ => unreachable!(),
     };
 
@@ -226,10 +237,10 @@ pub async fn detect_and_serialize_register_command(
     match cmd {
         RegisterCommand::Client(client_msg) => {
             serialize_client_command(client_msg, writer, &mut mac).await?;
-        },
+        }
         RegisterCommand::System(system_msg) => {
             serialize_system_command(system_msg, writer, &mut mac).await?;
-        },
+        }
     }
 
     let tag = mac.finalize().into_bytes().to_vec();
@@ -243,21 +254,17 @@ async fn serialize_system_command(
     writer: &mut (dyn AsyncWrite + Send + Unpin),
     mac: &mut HmacSha256,
 ) -> Result<(), std::io::Error> {
-    let (mut buff, msg_code) :(Vec<u8>, _) = match cmd.content {
-        SystemRegisterCommandContent::ReadProc => {
-            (Vec::with_capacity(40), MessageCode::ReadProc)
-        }
+    let (mut buff, msg_code): (Vec<u8>, _) = match cmd.content {
+        SystemRegisterCommandContent::ReadProc => (Vec::with_capacity(40), MessageCode::ReadProc),
         SystemRegisterCommandContent::Value { .. } => {
-            (Vec::with_capacity(40 + 16 + 4096), MessageCode::VALUE)
+            (Vec::with_capacity(40 + 16 + 4096), MessageCode::Value)
         }
         SystemRegisterCommandContent::WriteProc { .. } => {
             (Vec::with_capacity(40 + 16 + 4096), MessageCode::WriteProc)
         }
-        SystemRegisterCommandContent::Ack => {
-            (Vec::with_capacity(40), MessageCode::ACK)
-        }
+        SystemRegisterCommandContent::Ack => (Vec::with_capacity(40), MessageCode::Ack),
     };
-    
+
     buff.extend(&MAGIC_NUMBER);
     buff.extend(&[0u8, 0u8]);
     buff.push(cmd.header.process_identifier);
@@ -265,12 +272,22 @@ async fn serialize_system_command(
     buff.extend(cmd.header.msg_ident.as_bytes());
     buff.extend(&cmd.header.read_ident.to_be_bytes());
     buff.extend(&cmd.header.sector_idx.to_be_bytes());
-    if let SystemRegisterCommandContent::Value { timestamp, write_rank, ref sector_data } = cmd.content {
+    if let SystemRegisterCommandContent::Value {
+        timestamp,
+        write_rank,
+        ref sector_data,
+    } = cmd.content
+    {
         buff.extend(&timestamp.to_be_bytes());
         buff.extend(&[0u8; 7]);
         buff.push(write_rank);
         buff.extend(sector_data.0.as_slice());
-    } else if let SystemRegisterCommandContent::WriteProc { timestamp, write_rank, ref data_to_write } = cmd.content {
+    } else if let SystemRegisterCommandContent::WriteProc {
+        timestamp,
+        write_rank,
+        ref data_to_write,
+    } = cmd.content
+    {
         buff.extend(&timestamp.to_be_bytes());
         buff.extend(&[0u8; 7]);
         buff.push(write_rank);
@@ -288,9 +305,11 @@ async fn serialize_client_command(
     writer: &mut (dyn AsyncWrite + Send + Unpin),
     mac: &mut HmacSha256,
 ) -> Result<(), std::io::Error> {
-    let (mut buff, msg_code) : (Vec<u8>, _) = match cmd.content {
+    let (mut buff, msg_code): (Vec<u8>, _) = match cmd.content {
         ClientRegisterCommandContent::Read => (Vec::with_capacity(24), MessageCode::Read),
-        ClientRegisterCommandContent::Write { .. } => (Vec::with_capacity(24 + 4096), MessageCode::Write),
+        ClientRegisterCommandContent::Write { .. } => {
+            (Vec::with_capacity(24 + 4096), MessageCode::Write)
+        }
     };
 
     buff.extend_from_slice(MAGIC_NUMBER.as_ref());
@@ -302,10 +321,10 @@ async fn serialize_client_command(
         buff.extend(data.0.iter());
     }
     mac.update(buff.as_slice());
-    
+
     writer.write_all(buff.as_slice()).await?;
 
-    Ok(())  
+    Ok(())
 }
 
 fn try_to_msg_type(value: u8) -> Option<MessageCode> {
@@ -313,9 +332,9 @@ fn try_to_msg_type(value: u8) -> Option<MessageCode> {
         0x01 => Some(MessageCode::Read),
         0x02 => Some(MessageCode::Write),
         0x03 => Some(MessageCode::ReadProc),
-        0x04 => Some(MessageCode::VALUE),
+        0x04 => Some(MessageCode::Value),
         0x05 => Some(MessageCode::WriteProc),
-        0x06 => Some(MessageCode::ACK),
+        0x06 => Some(MessageCode::Ack),
         _ => None,
     }
 }
@@ -341,7 +360,7 @@ enum MessageCode {
     Read = 0x01,
     Write,
     ReadProc,
-    VALUE,
+    Value,
     WriteProc,
-    ACK,
+    Ack,
 }
