@@ -117,6 +117,7 @@ impl AtomicRegisterInstance {
 
     async fn client_write(&mut self, header: ClientCommandHeader, data: SectorVec) {
         let rid = self.get_rid().await + 1;
+        assert!(self.writeval.is_none());
         self.writeval = Some(data);
         self.readlist.clear();
         self.acklist.clear();
@@ -221,7 +222,7 @@ impl AtomicRegisterInstance {
             });
 
             let (maxts, rr, new_readval) = sorted.pop().unwrap();
-            self.readval = Some(new_readval);
+            self.readval = Some(new_readval.clone());
             self.readlist.clear();
             self.acklist.clear();
             self.write_phase = true;
@@ -236,10 +237,7 @@ impl AtomicRegisterInstance {
                 true => SystemRegisterCommandContent::WriteProc {
                     timestamp: maxts,
                     write_rank: rr,
-                    data_to_write: self
-                        .readval
-                        .clone()
-                        .expect("Error in algorithm logic, writeval not set"),
+                    data_to_write: new_readval,
                 },
                 false => {
                     // Do not store(ts, wr, val) here because it may cause race condition, instead store it when received broadcasted WRITE_PROC
@@ -248,7 +246,7 @@ impl AtomicRegisterInstance {
                         write_rank: self.self_ident,
                         data_to_write: self
                             .writeval
-                            .clone()
+                            .take()
                             .expect("Error in algorithm logic, writeval not set"),
                     }
                 }
@@ -266,7 +264,7 @@ impl AtomicRegisterInstance {
 
     async fn system_ack(&mut self, header: SystemCommandHeader) {
         let rid = self.get_rid().await;
-        if !(rid == header.read_ident && self.write_phase) {
+        if rid != header.read_ident || !self.write_phase {
             return;
         }
 
@@ -323,6 +321,8 @@ impl AtomicRegister for AtomicRegisterInstance {
             dyn FnOnce(OperationSuccess) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
         >,
     ) {
+        assert!(self.success_callback.is_none());
+        assert!(self.request_identifier.is_none());
         self.success_callback = Some(success_callback);
         self.request_identifier = Some(cmd.header.request_identifier);
 

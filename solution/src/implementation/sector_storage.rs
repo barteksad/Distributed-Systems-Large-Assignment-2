@@ -33,6 +33,11 @@ impl SectorStorage {
             metadata: Mutex::new(metadata),
         }
     }
+
+    fn path_for(&self, idx: SectorIdx, timestamp: u64, write_rank: u8) -> PathBuf {
+        self.path
+            .join(format!("{}.{}.{}", idx, timestamp, write_rank))
+    }
 }
 
 #[async_trait::async_trait]
@@ -46,7 +51,7 @@ impl SectorsManager for SectorStorage {
             let lock = self.metadata.lock().unwrap();
             let sector_data = lock.get(&idx);
             maybe_file_path = sector_data
-                .map(|(timestamp, wr)| self.path.join(format!("{}.{}.{}", idx, *timestamp, *wr)));
+                .map(|(timestamp, wr)| self.path_for(idx, *timestamp, *wr));
         }
 
         match maybe_file_path {
@@ -85,7 +90,7 @@ impl SectorsManager for SectorStorage {
             let lock = self.metadata.lock().unwrap();
             let sector_data = lock.get(&idx);
             maybe_file_path = sector_data
-                .map(|(prev_timestamp, prev_wr)| self.path.join(format!("{}.{}.{}", idx, *prev_timestamp, *prev_wr)));
+                .map(|(prev_timestamp, prev_wr)| self.path_for(idx, *prev_timestamp, *prev_wr));
         }
 
         if let Some(file_path) = maybe_file_path {
@@ -98,7 +103,7 @@ impl SectorsManager for SectorStorage {
                 .expect("Error syncing data!");
         }
 
-        let file_name = self.path.join(format!("{}.{}.{}", idx, timestamp, wr));
+        let file_name = self.path_for(idx, *timestamp, *wr);
         let tmp_file_name = self.path.join(format!("tmp.{}.{}.{}", idx, timestamp, wr));
         let mut file = tokio::fs::File::create(&tmp_file_name)
             .await

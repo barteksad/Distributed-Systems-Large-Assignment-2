@@ -1,21 +1,27 @@
-use std::time::Duration;
+use std::env;
 
-use my_test_utils::utils::TestProcessesConfig;
-
+use assignment_2_solution::{Configuration, PublicConfiguration, run_register_process};
+use log::debug;
+use tempfile::tempdir;
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    let n_processes = 16;
-    let port_range_start = 12345;
-    let n_clients = 16;
+    let n_clients: u16 = env::args().nth(1).unwrap().parse().unwrap();
+    let self_rank = env::args().nth(2).unwrap().parse().unwrap();
+    let storage_dir = tempdir().unwrap();
+    let tcp_port = 12345;
 
-    let config = TestProcessesConfig::new(n_processes, port_range_start);
-    config.init().await;
-    for i in 0..n_processes {
-        config.start(i).await;
-    }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    tokio::time::sleep(Duration::from_secs(100000)).await;
+    let config = Configuration {
+        public: PublicConfiguration {
+            tcp_locations: (0..n_clients).map(|p| ("127.0.0.1".to_string(), p + tcp_port)).collect(),
+            self_rank,
+            n_sectors: 2_u64.pow(21),
+            storage_dir: storage_dir.into_path(),
+        },
+        hmac_system_key: [1; 64],
+        hmac_client_key: [0; 32],
+    };
+    debug!("Starting process {:?}", self_rank);
+    tokio::spawn(run_register_process(config)).await.unwrap();
 }

@@ -13,13 +13,13 @@ use crate::{
 
 use super::{client_connector::ClientConnector, tcp_connector::TCPConnector};
 
+// If we have a maximum of 16 clients this number seems resonable
 static ARWORKER_COUNT: u8 = 16;
 
 pub struct RunManager {
     ready_for_client: Vec<Uuid>,
     ready_for_system: Vec<Uuid>,
     sector2rw: HashMap<SectorIdx, (usize, Uuid)>,
-    // uuid2sector: HashMap<Uuid, SectorIdx>,
     request_client_msg_handle_rx: Receiver<(ClientRegisterCommand, Sender<OperationReturn>)>,
     request_system_msg_handle_rx: Receiver<SystemRegisterCommand>,
     uuid2client_msg_tx: HashMap<Uuid, Sender<(ClientRegisterCommand, Sender<OperationReturn>)>>,
@@ -121,6 +121,7 @@ impl RunManager {
         tokio::pin!(system_msg_finished_rx);
         loop {
             tokio::select! {
+                // System message handling finished
                 recvd = &mut system_msg_finished_rx => {
                     let sector_idx = recvd.unwrap();
                     if let Some((rw_count, uuid)) = self.sector2rw.get_mut(&sector_idx) {
@@ -139,7 +140,6 @@ impl RunManager {
                 // Send new client message to be handeled if there is ARWorker ready to do so
                 recvd = &mut request_client_msg_handle_rx, if !self.ready_for_client.is_empty() => {
                     let (client_msg, result_tx) = recvd.unwrap();
-                    assert!(!self.ready_for_client.is_empty());
                     let uuid = self.ready_for_client.pop().unwrap();
                     if let Some(tx) = self.uuid2client_msg_tx.get(&uuid) {
                         tx.send((client_msg, result_tx)).await.expect("Error sending client message to ARWorker");
@@ -148,15 +148,16 @@ impl RunManager {
                 // Send new system message to be handeled if there is ARWorker ready to do so
                 recvd = &mut request_system_msg_handle_rx, if !self.ready_for_system.is_empty() => {
                     let system_msg = recvd.unwrap();
-                    assert!(!self.ready_for_system.is_empty());
                     let sector_idx = system_msg.header.sector_idx;
                     match system_msg.content {
+                        // Value and ACK messages are handled by the same ARWorker which handled the corresponding client message
                         Value { .. } | Ack => {
                             let uuid = &system_msg.header.msg_ident;
                             if let Some(tx) = self.uuid2system_msg_tx.get(uuid) {
                                 tx.send(system_msg).await.unwrap();
                             }
                         }
+                        // Read and Write messages are can couse data races and are handled by the ARWorker which is currently handling the sector
                         ReadProc | WriteProc { .. } => {
                             if let Some((rw_count, uuid)) = self.sector2rw.get_mut(&sector_idx) {
                                 *rw_count += 1;

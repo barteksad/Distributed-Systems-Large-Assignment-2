@@ -15,6 +15,7 @@ use crate::register_client_public::{Broadcast, Send};
 use super::utils::stubborn_send;
 
 static MAX_NOT_SEND_MSG_COUNT: usize = 256;
+static TRY_RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
 
 struct Connection {
     host: String,
@@ -57,6 +58,7 @@ impl Connection {
             'recover_wait_loop: loop {
                 let recover_rx = self.recover_rx.recv();
                 let msg_queue = self.msg_queue.recv();
+                let recover_timeout = tokio::time::sleep(TRY_RECONNECT_TIMEOUT);
                 tokio::pin!(recover_rx);
                 tokio::pin!(msg_queue);
 
@@ -72,7 +74,12 @@ impl Connection {
                             not_send.pop_front();
                         }
                     }
+                    _ = recover_timeout => {
+                        break 'recover_wait_loop;
+                    }
                 };
+
+                debug!("Trying to reconnect to {}", peer_address);
             }
         }
     }
@@ -138,7 +145,11 @@ impl ClientConnector {
         loop {
             let process = self.system_recovered_rx.recv().await.unwrap();
             if let Some(tx) = self.recover_txs.get(self.process2index(process)) {
-                tx.send(()).await.unwrap();
+                if !tx.is_full() {
+                    tx.send(()).await.unwrap();
+                }
+            } else {
+                debug!("Invalid recover process index! index:{}", process);
             }
         }
     }
